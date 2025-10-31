@@ -1,0 +1,52 @@
+Source Available Educational License
+
+Copyright (c) 2025 Layerbase, LLC
+
+IMPORTANT: This is NOT an open source license. The source code is made publicly
+available for educational purposes, security auditing, and learning only.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, and study the Software for educational and non-commercial purposes
+only, subject to the following conditions:
+
+1. PERMITTED USES:
+   - Educational and learning purposes
+   - Security auditing and code review
+   - Personal, non-commercial projects
+   - Academic research and teaching
+
+2. PROHIBITED USES:
+   - Commercial use of any kind
+   - Use by for-profit enterprises or organizations
+   - Integration into commercial products or services
+   - Use in production environments for business purposes
+   - Distribution or sale of the Software or derivatives for profit
+
+3. ATTRIBUTION:
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+4. MODIFICATIONS:
+   You may create derivative works for educational purposes only. Any derivative
+   works must carry this same license and may not be used commercially.
+
+5. NO COMMERCIAL LICENSING:
+   Commercial use requires explicit written permission from the copyright holder.
+   Contact information for commercial licensing inquiries can be provided upon
+   request.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This software is source-available for transparency and educational purposes,
+but is NOT open source as defined by the Open Source Initiative. It is designed
+as a learning project to explore PGP encryption, progressive enhancement, and
+building web applications that work without JavaScript.
