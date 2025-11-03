@@ -3,9 +3,33 @@
 ## High Priority
 
 - [ ] Add SQLite database integration
-  - Set up database schema
-  - Add database connection management
-  - Implement data persistence layer
+  - Set up database connection with better-sqlite3
+  - Implement core database schema migration
+  - Update Keypair table with missing fields:
+    - Add `expires_at` (ISO date or null)
+    - Add `revoked` (boolean)
+    - Add `revocation_reason` (string, optional)
+    - Add `algorithm` (string: "RSA", "EdDSA", etc.)
+    - Add `key_size` (number or curve name)
+    - Add `can_sign`, `can_encrypt`, `can_certify`, `can_authenticate` (boolean flags)
+    - Add `last_used_at` (timestamp, optional)
+  - Update Contact table with missing fields:
+    - Add `expires_at` (ISO date or null)
+    - Add `revoked` (boolean)
+    - Add `last_verified_at` (timestamp, optional)
+    - Add `algorithm` (string)
+    - Add `key_size` (number)
+  - Restructure Settings table from key/value to typed fields:
+    - `default_keypair_id` (number or null)
+    - `auto_sign_messages` (boolean)
+    - `prefer_inline_pgp` (boolean)
+    - `keyserver_url` (string)
+  - Add database constraints:
+    - UNIQUE constraint on `fingerprint` for both Keypair and Contact
+    - UNIQUE constraint on `email` for Keypair
+    - Indexes on `email` and `fingerprint` for fast lookups
+  - Migrate existing JSON data to SQLite
+  - Update Database class to use SQLite instead of JSON file
 
 - [ ] Create bash install script
   - Automate dependency installation
