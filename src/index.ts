@@ -1,36 +1,37 @@
 import { createServer } from 'http'
 
 // test all db functionality
-import { Database } from './db.js'
+import { Db } from './db.js'
 
-const db = new Database()
+const db = new Db()
 
-// Example usage (can be removed later)
-const contact1 = db.insert('contact', {
-  name: 'Alice Smith',
-  email: 'alice@example.com',
-  fingerprint: 'ABCD1234EFGH5678',
-  public_key: '-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----',
-  trusted: true,
-  notes: 'Met at conference 2024',
-  created_at: new Date().toISOString(),
-  updated_at: new Date().toISOString(),
-})
-console.log('Inserted contact with ID:', contact1.id)
+// Example usage - test database operations
+console.log('\n=== Testing Database Operations ===\n')
 
-const contact2 = db.insert('contact', {
-  name: 'Bob Jones',
-  email: 'bob@example.com',
-  fingerprint: 'WXYZ9876ABCD5432',
-  public_key: '-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----',
-  trusted: false,
-  created_at: new Date().toISOString(),
-  updated_at: new Date().toISOString(),
-})
-console.log('Inserted contact with ID:', contact2.id)
-
-let contacts = db.select({ table: 'contact' })
+// Test SELECT
+const contacts = db.select({ table: 'contact' })
 console.log('All contacts:', contacts)
+
+// Test SELECT with WHERE clause
+const aliceContacts = db.select({
+  table: 'contact',
+  where: { key: 'name', compare: 'like', value: 'Alice' },
+})
+console.log('\nContacts matching "Alice":', aliceContacts)
+
+// Test UPDATE
+if (contacts.length > 0 && contacts[0]) {
+  console.log('\nUpdating first contact to trusted...')
+  db.update('contact', { key: 'id', value: contacts[0].id }, { trusted: true })
+  const updated = db.select({ table: 'contact', where: { key: 'id', compare: 'is', value: contacts[0].id } })
+  console.log('Updated contact:', updated[0])
+}
+
+// Test Settings
+const settings = db.select({ table: 'settings' })
+console.log('\nCurrent settings:', settings)
+
+console.log('\n=== Database Tests Complete ===\n')
 
 // db.delete('contact', { key: 'id', value: 1 })
 

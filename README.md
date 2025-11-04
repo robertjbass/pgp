@@ -1,8 +1,8 @@
-# 🔐 Dash - PGP Encryption CLI Tool
+# 🔐 Layerbase PGP - PGP Encryption CLI Tool
 
 > **Note:** This is a personal side project created to learn more about encryption, PGP, and implementing secure web applications that work without JavaScript. It's a work in progress and should be used for educational purposes.
 
-A beautiful, interactive command-line tool for encrypting and decrypting messages using PGP (Pretty Good Privacy). Built with Node.js and TypeScript, Dash provides a user-friendly interface for secure message encryption with multiple input methods and cross-platform support.
+A beautiful, interactive command-line tool for encrypting and decrypting messages using PGP (Pretty Good Privacy). Built with Node.js and TypeScript, Layerbase PGP provides a user-friendly interface for secure message encryption with multiple input methods and cross-platform support.
 
 ## ⚠️ Project Status
 
@@ -31,11 +31,43 @@ This project is **actively being developed** as a learning exercise. While funct
 
 ### Installation
 
+#### Option 1: Automated Installer (Recommended for Non-Developers)
+
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/dash.git
-cd dash
+git clone https://github.com/yourusername/layerbase-pgp.git
+cd layerbase-pgp
+```
+
+2. Run the installer:
+
+```bash
+./install.sh
+```
+
+The installer will:
+- Detect your operating system and shell
+- Check for Node.js and install it if missing (using nvm)
+- Check for pnpm and install it if missing
+- Install all dependencies and compile native modules
+- Build the project
+- Create a `.env` file from the example
+- Optionally create an `lpgp` command alias
+
+3. Configure your PGP keys:
+
+Edit the `.env` file and add your PGP keys (see `.env.example` for format).
+
+**Important:** Make sure there's a blank line after the `BEGIN` header in your PGP keys.
+
+#### Option 2: Manual Installation (For Developers)
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/yourusername/layerbase-pgp.git
+cd layerbase-pgp
 ```
 
 2. Install dependencies:
@@ -44,13 +76,35 @@ cd dash
 pnpm install
 ```
 
+This will install all Node.js dependencies including `better-sqlite3`, which requires native compilation. The installation process automatically:
+- Compiles the SQLite native module for your platform
+- Sets up the project dependencies
+- Prepares the development environment
+
 3. Set up your environment variables:
 
 Create a `.env` file in the root directory with your PGP keys:
 
-See `.env.example`
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and add your PGP keys.
 
 **Important:** Make sure there's a blank line after the `BEGIN` header in your PGP keys.
+
+4. Build the project:
+
+```bash
+pnpm build
+```
+
+5. Database initialization:
+
+The SQLite database is automatically created on first run. No manual setup required! When you first start the application, it will:
+- Create the `db/` directory
+- Initialize an empty SQLite database with all tables
+- Set up default settings
 
 ### Usage
 
@@ -114,14 +168,18 @@ pnpm start
 ### Project Structure
 
 ```
-dash/
+layerbase-pgp/
 ├── src/
 │   ├── index.ts          # Placeholder server
-│   └── pgp-tool.ts       # Main PGP CLI tool
+│   ├── pgp-tool.ts       # Main PGP CLI tool
+│   ├── db.ts             # SQLite database layer
+│   └── schema.sql        # Database schema definition
+├── db/                   # SQLite database (auto-created, not in git)
+│   └── data.db           # User data and PGP keys
 ├── .env                  # Environment variables (not in git)
 ├── package.json
 ├── tsconfig.json
-├── TODO.md              # Project roadmap
+├── TODO.md               # Project roadmap
 └── README.md
 ```
 
@@ -129,7 +187,7 @@ dash/
 
 See [TODO.md](TODO.md) for the complete project roadmap. Upcoming features include:
 
-- SQLite database integration
+- ✅ SQLite database integration (completed)
 - Configuration file support (replacing .env)
 - Web UI with Express backend
 - **Standalone landing page with progressive enhancement**

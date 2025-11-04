@@ -6,11 +6,12 @@ import { execSync } from 'child_process'
 import * as readline from 'readline'
 import { stdin as input, stdout as output } from 'process'
 import clipboardy from 'clipboardy'
+import { Db } from './db.js'
+import { KeyManager } from './key-manager.js'
 
-// Load environment variables
-const PGP_PUBLIC_KEY = process.env.PGP_PUBLIC_KEY
-const PGP_PRIVATE_KEY = process.env.PGP_PRIVATE_KEY
-const PGP_PASSPHRASE = process.env.PGP_PASSPHRASE
+// Initialize database and key manager
+const db = new Db()
+const keyManager = new KeyManager(db)
 
 interface EditorChoice {
   name: string
@@ -19,31 +20,47 @@ interface EditorChoice {
 }
 
 async function encryptMessage(message: string): Promise<string> {
-  if (!PGP_PUBLIC_KEY) {
-    throw new Error('PGP_PUBLIC_KEY not found in environment variables')
+  const defaultKeypair = await keyManager.getDefaultKeypair()
+  if (!defaultKeypair) {
+    throw new Error('No default keypair found. Please set up a keypair first.')
   }
 
-  const publicKey = await openpgp.readKey({ armoredKey: PGP_PUBLIC_KEY })
+  const publicKey = await openpgp.readKey({ armoredKey: defaultKeypair.public_key })
 
   const encrypted = await openpgp.encrypt({
     message: await openpgp.createMessage({ text: message }),
     encryptionKeys: publicKey,
   })
 
+  // Update last_used_at
+  db.update('keypair', { key: 'id', value: defaultKeypair.id }, { last_used_at: new Date().toISOString() })
+
   return encrypted as string
 }
 
 async function decryptMessage(encryptedMessage: string): Promise<string> {
-  if (!PGP_PRIVATE_KEY) {
-    throw new Error('PGP_PRIVATE_KEY not found in environment variables')
+  const defaultKeypair = await keyManager.getDefaultKeypair()
+  if (!defaultKeypair) {
+    throw new Error('No default keypair found. Please set up a keypair first.')
   }
-  if (!PGP_PASSPHRASE) {
-    throw new Error('PGP_PASSPHRASE not found in environment variables')
+
+  // Prompt for passphrase if key is passphrase-protected
+  let passphrase = ''
+  if (defaultKeypair.passphrase_protected) {
+    const { passphraseInput } = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'passphraseInput',
+        message: chalk.yellow('Enter your private key passphrase:'),
+        mask: '*',
+      },
+    ])
+    passphrase = passphraseInput
   }
 
   const privateKey = await openpgp.decryptKey({
-    privateKey: await openpgp.readPrivateKey({ armoredKey: PGP_PRIVATE_KEY }),
-    passphrase: PGP_PASSPHRASE,
+    privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key }),
+    passphrase,
   })
 
   const message = await openpgp.readMessage({
@@ -54,6 +71,9 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
     message,
     decryptionKeys: privateKey,
   })
+
+  // Update last_used_at
+  db.update('keypair', { key: 'id', value: defaultKeypair.id }, { last_used_at: new Date().toISOString() })
 
   return decrypted as string
 }
@@ -118,12 +138,20 @@ async function readInlineMultilineInput(promptText: string): Promise<string> {
 function printBanner() {
   console.clear()
   console.log(chalk.cyan.bold('\n╔════════════════════════════════════════╗'))
-  console.log(chalk.cyan.bold('║  🔐  PGP Encryption/Decryption Tool   ║'))
+  console.log(chalk.cyan.bold('║      🔐  Layerbase PGP Tool           ║'))
   console.log(chalk.cyan.bold('╚════════════════════════════════════════╝\n'))
 }
 
 async function main() {
   printBanner()
+
+  // Check for default keypair on first run
+  const hasKeypair = await keyManager.hasDefaultKeypair()
+  if (!hasKeypair) {
+    console.log(chalk.yellow('\n⚠️  No keypair found. Let\'s set up your first keypair.\n'))
+    await keyManager.setupFirstKeypair()
+    console.log(chalk.green('\n✅ Setup complete! You can now use the tool.\n'))
+  }
 
   const { action } = await inquirer.prompt([
     {
@@ -140,6 +168,10 @@ async function main() {
           value: 'decrypt',
         },
         {
+          name: '🔑 Manage keys',
+          value: 'keys',
+        },
+        {
           name: '👋 Exit',
           value: 'exit',
         },
@@ -150,6 +182,11 @@ async function main() {
   if (action === 'exit') {
     console.log(chalk.green('\n✨ Goodbye!\n'))
     process.exit(0)
+  }
+
+  if (action === 'keys') {
+    await keyManager.showKeyManagementMenu()
+    return main()
   }
 
   if (action === 'encrypt') {

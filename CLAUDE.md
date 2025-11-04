@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Dash** is a learning project focused on PGP encryption/decryption with two main components:
+**Layerbase PGP** is a learning project focused on PGP encryption/decryption with two main components:
+
 1. A fully-functional interactive CLI tool for PGP operations (current)
 2. A planned web application with progressive enhancement (future)
 
 **Key Learning Goals:**
+
 - Understanding PGP encryption and cryptography
 - Building accessible web applications that work without JavaScript
 - Progressive enhancement: server-side encryption fallback + client-side enhancements
@@ -19,6 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ### Running the Application
+
 ```bash
 # Run the interactive PGP CLI tool (main entrypoint)
 pnpm pgp
@@ -34,6 +37,7 @@ pnpm start
 ```
 
 ### Code Maintenance
+
 ```bash
 # Format all code with Prettier
 pnpm format
@@ -44,6 +48,7 @@ pnpm format
 ### Current State: CLI Tool Only
 
 The project currently consists of:
+
 - **[src/pgp-tool.ts](src/pgp-tool.ts)** - Main CLI application with interactive menus, encryption/decryption, and multiple input methods
 - **[src/index.ts](src/index.ts)** - Placeholder HTTP server (to be replaced with Express)
 
@@ -75,6 +80,7 @@ Editor detection ([src/pgp-tool.ts:70-96](src/pgp-tool.ts#L70-L96)) checks platf
 ### Environment Configuration
 
 **Current:** `.env` file with three required variables:
+
 - `PGP_PUBLIC_KEY` - Armored public key for encryption
 - `PGP_PRIVATE_KEY` - Armored private key for decryption (must be passphrase-protected)
 - `PGP_PASSPHRASE` - Passphrase to unlock the private key
@@ -127,6 +133,7 @@ The web UI will support TWO modes:
 ## Roadmap Reference
 
 See [TODO.md](TODO.md) for the full roadmap. High-priority items:
+
 - SQLite database integration
 - Config file to replace `.env`
 - Express backend setup
