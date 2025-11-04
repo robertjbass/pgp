@@ -1,21 +1,22 @@
 {
   "name": "layerbase-pgp",
   "version": "1.0.0",
-  "description": "",
+  "description": "A beautiful, interactive CLI tool for PGP encryption/decryption with SQLite key management",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "serve": "nodemon --watch src --ext ts --exec 'tsx --env-file=.env src/index.ts'",
     "pgp": "tsx --env-file=.env src/pgp-tool.ts",
     "format": "prettier --write .",
-    "build": "tsc",
+    "build": "tsc && cp src/schema.sql dist/schema.sql",
     "start": "node dist/index.js"
   },
-  "keywords": [],
+  "keywords": ["pgp", "encryption", "openpgp", "cli", "security", "privacy"],
   "author": "",
   "license": "SEE LICENSE IN LICENSE",
   "packageManager": "pnpm@10.19.0",
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.9.2",
     "nodemon": "^3.1.10",
     "prettier": "^3.6.2",
@@ -24,6 +25,7 @@
   },
   "dependencies": {
     "@types/inquirer": "^9.0.9",
+    "better-sqlite3": "^12.4.1",
     "chalk": "^5.6.2",
     "clipboardy": "^5.0.0",
     "inquirer": "^12.10.0",
