@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "pnpm build:shared",
+  "buildCommand": "pnpm --filter @pgp/shared build",
   "installCommand": "pnpm install",
   "outputDirectory": "packages/api/public",
   "functions": {
