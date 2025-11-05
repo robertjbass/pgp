@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "pnpm install && pnpm build:shared",
+  "buildCommand": "pnpm build:shared",
   "installCommand": "pnpm install",
   "outputDirectory": "packages/api/public",
   "functions": {
