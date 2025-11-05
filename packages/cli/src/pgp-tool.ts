@@ -8,10 +8,14 @@ import { stdin as input, stdout as output } from 'process'
 import clipboardy from 'clipboardy'
 import { Db } from './db.js'
 import { KeyManager } from './key-manager.js'
+import { extractPublicKeyInfo } from './key-utils.js'
 
 // Initialize database and key manager
 const db = new Db()
 const keyManager = new KeyManager(db)
+
+// Session passphrase cache - stores passphrases by keypair ID
+const passphraseCache = new Map<number, string>()
 
 interface EditorChoice {
   name: string
@@ -19,21 +23,28 @@ interface EditorChoice {
   available: boolean
 }
 
-async function encryptMessage(message: string): Promise<string> {
-  const defaultKeypair = await keyManager.getDefaultKeypair()
-  if (!defaultKeypair) {
-    throw new Error('No default keypair found. Please set up a keypair first.')
-  }
+async function encryptMessage(message: string, publicKeyArmored?: string): Promise<string> {
+  let publicKey: openpgp.PublicKey
 
-  const publicKey = await openpgp.readKey({ armoredKey: defaultKeypair.public_key })
+  if (publicKeyArmored) {
+    // Use provided public key (someone else's key)
+    publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored })
+  } else {
+    // Use default keypair's public key (encrypt to self)
+    const defaultKeypair = await keyManager.getDefaultKeypair()
+    if (!defaultKeypair) {
+      throw new Error('No default keypair found. Please set up a keypair first.')
+    }
+    publicKey = await openpgp.readKey({ armoredKey: defaultKeypair.public_key })
+
+    // Update last_used_at
+    db.update('keypair', { key: 'id', value: defaultKeypair.id }, { last_used_at: new Date().toISOString() })
+  }
 
   const encrypted = await openpgp.encrypt({
     message: await openpgp.createMessage({ text: message }),
     encryptionKeys: publicKey,
   })
-
-  // Update last_used_at
-  db.update('keypair', { key: 'id', value: defaultKeypair.id }, { last_used_at: new Date().toISOString() })
 
   return encrypted as string
 }
@@ -44,18 +55,36 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
     throw new Error('No default keypair found. Please set up a keypair first.')
   }
 
-  // Prompt for passphrase if key is passphrase-protected
+  // Check if passphrase is cached for this keypair
   let passphrase = ''
   if (defaultKeypair.passphrase_protected) {
-    const { passphraseInput } = await inquirer.prompt([
-      {
-        type: 'password',
-        name: 'passphraseInput',
-        message: chalk.yellow('Enter your private key passphrase:'),
-        mask: '*',
-      },
-    ])
-    passphrase = passphraseInput
+    if (passphraseCache.has(defaultKeypair.id)) {
+      // Use cached passphrase
+      passphrase = passphraseCache.get(defaultKeypair.id)!
+    } else {
+      // Prompt for passphrase and cache it
+      const { passphraseInput } = await inquirer.prompt([
+        {
+          type: 'password',
+          name: 'passphraseInput',
+          message: chalk.yellow('Enter your private key passphrase:'),
+          mask: '*',
+        },
+      ])
+      passphrase = passphraseInput
+
+      // Validate the passphrase by attempting to decrypt the key
+      try {
+        await openpgp.decryptKey({
+          privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key }),
+          passphrase,
+        })
+        // If successful, cache the passphrase
+        passphraseCache.set(defaultKeypair.id, passphrase)
+      } catch (error) {
+        throw new Error('Incorrect passphrase')
+      }
+    }
   }
 
   const privateKey = await openpgp.decryptKey({
@@ -135,11 +164,94 @@ async function readInlineMultilineInput(promptText: string): Promise<string> {
   })
 }
 
+async function getRecipientPublicKey(): Promise<string | null> {
+  // Check clipboard for public key
+  let clipboardContent = ''
+  let hasPublicKeyInClipboard = false
+
+  try {
+    clipboardContent = await clipboardy.read()
+    hasPublicKeyInClipboard = clipboardContent.includes('BEGIN PGP PUBLIC KEY BLOCK')
+  } catch (e) {
+    // Clipboard not available, continue without it
+  }
+
+  let publicKey = ''
+
+  // If public key found in clipboard, ask if user wants to use it
+  if (hasPublicKeyInClipboard) {
+    const { useClipboard } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'useClipboard',
+        message: 'Public key detected in clipboard. Use it?',
+        default: true,
+      },
+    ])
+
+    if (useClipboard) {
+      const publicMatch = clipboardContent.match(/-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/)
+      if (publicMatch) {
+        publicKey = publicMatch[0]
+      }
+    }
+  }
+
+  // If no key from clipboard, prompt for input
+  if (!publicKey) {
+    console.log(chalk.yellow('\nPaste the recipient\'s PGP PUBLIC key:'))
+    console.log(chalk.gray('(Press Enter to finish, or press Enter then Ctrl+D)\n'))
+
+    const rl = readline.createInterface({ input, output })
+    const lines: string[] = []
+
+    publicKey = await new Promise((resolve) => {
+      rl.on('line', (line: string) => {
+        lines.push(line)
+        const content = lines.join('\n')
+
+        // Check if we have a complete key block and current line is empty
+        if (line.trim() === '' &&
+            content.includes('-----BEGIN PGP PUBLIC KEY BLOCK') &&
+            content.includes('-----END PGP PUBLIC KEY BLOCK')) {
+          rl.close()
+          resolve(content.trim())
+        }
+      })
+
+      rl.on('close', () => {
+        resolve(lines.join('\n'))
+      })
+    })
+  }
+
+  // Validate public key format
+  if (!publicKey.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
+    console.log(chalk.red('\n❌ Invalid public key format\n'))
+    return null
+  }
+
+  // Try to read the key to validate it
+  try {
+    await openpgp.readKey({ armoredKey: publicKey })
+    console.log(chalk.green('\n✓ Valid public key\n'))
+    return publicKey
+  } catch (error) {
+    console.log(chalk.red('\n❌ Failed to read public key:', error instanceof Error ? error.message : error))
+    return null
+  }
+}
+
 function printBanner() {
   console.clear()
   console.log(chalk.cyan.bold('\n╔════════════════════════════════════════╗'))
   console.log(chalk.cyan.bold('║      🔐  Layerbase PGP Tool           ║'))
   console.log(chalk.cyan.bold('╚════════════════════════════════════════╝\n'))
+}
+
+function clearPassphraseCache() {
+  // Clear all cached passphrases from memory
+  passphraseCache.clear()
 }
 
 async function main() {
@@ -180,6 +292,7 @@ async function main() {
   ])
 
   if (action === 'exit') {
+    clearPassphraseCache()
     console.log(chalk.green('\n✨ Goodbye!\n'))
     process.exit(0)
   }
@@ -191,6 +304,92 @@ async function main() {
 
   if (action === 'encrypt') {
     try {
+      // Ask who to encrypt for
+      const { recipient } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'recipient',
+          message: chalk.yellow('Who do you want to encrypt this message for?'),
+          choices: [
+            {
+              name: '🔑 Myself (use my public key)',
+              value: 'self',
+            },
+            {
+              name: '👤 Someone else (use their public key)',
+              value: 'other',
+            },
+            {
+              name: '← Back to main menu',
+              value: 'back',
+            },
+          ],
+        },
+      ])
+
+      if (recipient === 'back') {
+        return main()
+      }
+
+      let recipientPublicKey: string | undefined
+      let isNewContact = false
+
+      // If encrypting for someone else, get their public key
+      if (recipient === 'other') {
+        // Check if there are any saved contacts
+        const contacts = db.select({ table: 'contact' })
+
+        if (contacts.length > 0) {
+          // Offer saved contacts or new key
+          const contactChoices: Array<{ name: string; value: number | string }> = contacts.map((c) => ({
+            name: `${c.name} <${c.email}>`,
+            value: c.id,
+          }))
+          contactChoices.push(
+            { name: '➕ Use a new public key', value: 'new' },
+            { name: '← Back', value: 'back' }
+          )
+
+          const { contactChoice } = await inquirer.prompt([
+            {
+              type: 'list',
+              name: 'contactChoice',
+              message: chalk.yellow('Select a contact or enter a new key:'),
+              choices: contactChoices,
+            },
+          ])
+
+          if (contactChoice === 'back') {
+            return main()
+          }
+
+          if (contactChoice === 'new') {
+            const publicKey = await getRecipientPublicKey()
+            if (!publicKey) {
+              console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
+              return main()
+            }
+            recipientPublicKey = publicKey
+            isNewContact = true
+          } else {
+            // Use saved contact
+            const selectedContact = contacts.find((c) => c.id === contactChoice)
+            if (selectedContact) {
+              recipientPublicKey = selectedContact.public_key
+            }
+          }
+        } else {
+          // No saved contacts, get new key
+          const publicKey = await getRecipientPublicKey()
+          if (!publicKey) {
+            console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
+            return main()
+          }
+          recipientPublicKey = publicKey
+          isNewContact = true
+        }
+      }
+
       // Detect available editors
       const availableEditors = detectAvailableEditors()
 
@@ -221,6 +420,12 @@ async function main() {
         })
       }
 
+      // Add back to main menu option
+      inputChoices.push({
+        name: '← Back to main menu',
+        value: 'back',
+      })
+
       const { inputMethod } = await inquirer.prompt([
         {
           type: 'list',
@@ -229,6 +434,10 @@ async function main() {
           choices: inputChoices,
         },
       ])
+
+      if (inputMethod === 'back') {
+        return main()
+      }
 
       let message: string
 
@@ -303,7 +512,7 @@ async function main() {
       }
 
       console.log(chalk.blue('\n⏳ Encrypting message...\n'))
-      const encrypted = await encryptMessage(message)
+      const encrypted = await encryptMessage(message, recipientPublicKey)
 
       console.log(chalk.green.bold('✅ Encrypted Message:\n'))
       console.log(chalk.gray('─'.repeat(50)))
@@ -318,6 +527,70 @@ async function main() {
         console.log(
           chalk.yellow('\n⚠️  Could not copy to clipboard automatically\n')
         )
+      }
+
+      // Offer to save the contact if it's a new public key
+      if (isNewContact && recipientPublicKey) {
+        const { saveContact } = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'saveContact',
+            message: chalk.yellow('Would you like to save this contact for future use?'),
+            default: true,
+          },
+        ])
+
+        if (saveContact) {
+          try {
+            // Extract key information
+            const keyInfo = await extractPublicKeyInfo(recipientPublicKey)
+
+            // Prompt for contact name
+            const defaultName = (keyInfo.email || 'unknown').split('@')[0] || 'Contact'
+            const answers = await inquirer.prompt([
+              {
+                type: 'input',
+                name: 'contactName',
+                message: 'Contact name:',
+                default: defaultName,
+                validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+              },
+            ])
+            const contactName = answers.contactName as string
+
+            // Check if contact already exists by fingerprint
+            const existingContacts = db.select({
+              table: 'contact',
+              where: { key: 'fingerprint', compare: 'is', value: keyInfo.fingerprint },
+            })
+
+            if (existingContacts.length > 0) {
+              console.log(chalk.yellow('\n⚠️  This contact already exists.\n'))
+            } else {
+              // Save the contact
+              db.insert('contact', {
+                name: contactName.trim(),
+                email: keyInfo.email,
+                fingerprint: keyInfo.fingerprint,
+                public_key: recipientPublicKey,
+                algorithm: keyInfo.algorithm,
+                key_size: keyInfo.keySize,
+                trusted: false,
+                last_verified_at: null,
+                notes: null,
+                expires_at: keyInfo.expiresAt,
+                revoked: false,
+              })
+
+              console.log(chalk.green(`\n✓ Contact "${contactName}" saved successfully!\n`))
+            }
+          } catch (error) {
+            console.log(
+              chalk.red('\n❌ Failed to save contact:'),
+              error instanceof Error ? error.message : error
+            )
+          }
+        }
       }
     } catch (error) {
       console.log(
@@ -359,6 +632,12 @@ async function main() {
         })
       }
 
+      // Add back to main menu option
+      inputChoices.push({
+        name: '← Back to main menu',
+        value: 'back',
+      })
+
       const { inputMethod } = await inquirer.prompt([
         {
           type: 'list',
@@ -369,6 +648,10 @@ async function main() {
           choices: inputChoices,
         },
       ])
+
+      if (inputMethod === 'back') {
+        return main()
+      }
 
       let encrypted: string
 
@@ -461,6 +744,15 @@ async function main() {
           chalk.yellow('\n⚠️  Could not copy to clipboard automatically\n')
         )
       }
+
+      // Wait for user to press Enter before continuing
+      await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'continue',
+          message: chalk.cyan('Press Enter to continue...'),
+        },
+      ])
     } catch (error) {
       console.log(
         chalk.red(
@@ -493,12 +785,14 @@ async function main() {
   if (nextAction === 'continue') {
     await main()
   } else {
+    clearPassphraseCache()
     console.log(chalk.green('\n✨ Goodbye!\n'))
   }
 }
 
 // Graceful exit on Ctrl+C
 process.on('SIGINT', () => {
+  clearPassphraseCache()
   console.log(chalk.green('\n\n👋 Goodbye!\n'))
   process.exit(0)
 })
@@ -506,10 +800,12 @@ process.on('SIGINT', () => {
 main().catch((error) => {
   // Handle Ctrl+C gracefully (inquirer throws ExitPromptError)
   if (error.message && error.message.includes('force closed the prompt')) {
+    clearPassphraseCache()
     console.log(chalk.green('\n👋 Goodbye!\n'))
     process.exit(0)
   }
 
+  clearPassphraseCache()
   console.error(chalk.red('\n❌ Error:'), error.message || error)
   process.exit(1)
 })

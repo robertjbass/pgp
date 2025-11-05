@@ -2,7 +2,7 @@ import inquirer from 'inquirer'
 import chalk from 'chalk'
 import * as readline from 'readline'
 import * as openpgp from 'openpgp'
-import { Db, type Keypair } from './db.js'
+import { Db, type Keypair, type Contact } from './db.js'
 import {
   extractPublicKeyInfo,
   extractPrivateKeyInfo,
@@ -612,7 +612,8 @@ export class KeyManager {
         name: 'action',
         message: 'Key Management',
         choices: [
-          { name: '🔑 View/Manage Keys', value: 'view' },
+          { name: '🔑 View/Manage My Keys', value: 'view' },
+          { name: '👥 View/Manage Contacts', value: 'contacts' },
           { name: '📥 Import keypair', value: 'import' },
           { name: '💻 Import from System GPG', value: 'import-gpg' },
           { name: '🔐 Generate new keypair', value: 'generate' },
@@ -624,6 +625,10 @@ export class KeyManager {
     switch (action) {
       case 'view':
         await this.viewAndManageKeys()
+        await this.showKeyManagementMenu()
+        break
+      case 'contacts':
+        await this.viewAndManageContacts()
         await this.showKeyManagementMenu()
         break
       case 'import':
@@ -701,7 +706,7 @@ export class KeyManager {
           { name: '✏️  Rename key', value: 'rename' },
           { name: '⭐ Set as default', value: 'set-default' },
           { name: '🗑️  Delete key', value: 'delete' },
-          { name: '← Back', value: 'back' },
+          { name: '← Back to key list', value: 'back' },
         ],
       },
     ])
@@ -996,5 +1001,226 @@ export class KeyManager {
         resolve(lines.join('\n'))
       })
     })
+  }
+
+  /**
+   * View and manage contacts
+   */
+  private async viewAndManageContacts(): Promise<void> {
+    const contacts = this.db.select({ table: 'contact' })
+
+    if (contacts.length === 0) {
+      console.log(chalk.yellow('\nNo contacts found.\n'))
+      return
+    }
+
+    const { contactId } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'contactId',
+        message: 'Select a contact to manage:',
+        choices: [
+          ...contacts.map((c) => ({
+            name: `${c.name} - ${c.email}`,
+            value: c.id,
+          })),
+          { name: '← Back', value: null },
+        ],
+      },
+    ])
+
+    if (contactId === null) {
+      return
+    }
+
+    const selectedContact = contacts.find((c) => c.id === contactId)
+    if (!selectedContact) return
+
+    await this.manageIndividualContact(selectedContact)
+  }
+
+  /**
+   * Manage an individual contact
+   */
+  private async manageIndividualContact(contact: Contact): Promise<void> {
+    // Display contact information
+    console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
+    console.log(chalk.blue('║') + '  👤 Contact Details                ' + chalk.blue('║'))
+    console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
+    console.log(chalk.cyan('Name:') + ` ${contact.name}`)
+    console.log(chalk.cyan('Email:') + ` ${contact.email}`)
+    console.log(chalk.cyan('Fingerprint:') + ` ${contact.fingerprint}`)
+    console.log(chalk.cyan('Algorithm:') + ` ${contact.algorithm} (${contact.key_size})`)
+    console.log(chalk.cyan('Trusted:') + ` ${contact.trusted ? 'Yes' : 'No'}`)
+    if (contact.expires_at) {
+      console.log(chalk.cyan('Expires:') + ` ${contact.expires_at}`)
+    }
+    if (contact.notes) {
+      console.log(chalk.cyan('Notes:') + ` ${contact.notes}`)
+    }
+    console.log()
+
+    const { action } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'What would you like to do?',
+        choices: [
+          { name: '📋 Copy public key', value: 'copy-public' },
+          { name: '🖥️  View public key', value: 'view-public' },
+          { name: '✏️  Rename contact', value: 'rename' },
+          { name: '📝 Edit notes', value: 'edit-notes' },
+          { name: '⭐ Toggle trust', value: 'toggle-trust' },
+          { name: '🗑️  Delete contact', value: 'delete' },
+          { name: '← Back to contact list', value: 'back' },
+        ],
+      },
+    ])
+
+    switch (action) {
+      case 'copy-public':
+        await this.copyContactPublicKey(contact)
+        await this.manageIndividualContact(contact)
+        break
+      case 'view-public':
+        await this.viewContactPublicKey(contact)
+        await this.manageIndividualContact(contact)
+        break
+      case 'rename':
+        await this.renameContact(contact)
+        const updated = this.db.select({
+          table: 'contact',
+          where: { key: 'id', compare: 'is', value: contact.id },
+        })[0]
+        if (updated) await this.manageIndividualContact(updated)
+        break
+      case 'edit-notes':
+        await this.editContactNotes(contact)
+        const updatedNotes = this.db.select({
+          table: 'contact',
+          where: { key: 'id', compare: 'is', value: contact.id },
+        })[0]
+        if (updatedNotes) await this.manageIndividualContact(updatedNotes)
+        break
+      case 'toggle-trust':
+        await this.toggleContactTrust(contact)
+        const refreshed = this.db.select({
+          table: 'contact',
+          where: { key: 'id', compare: 'is', value: contact.id },
+        })[0]
+        if (refreshed) await this.manageIndividualContact(refreshed)
+        break
+      case 'delete':
+        const deleted = await this.deleteContact(contact.id)
+        if (!deleted) {
+          await this.manageIndividualContact(contact)
+        }
+        break
+      case 'back':
+        return
+    }
+  }
+
+  /**
+   * Copy contact's public key to clipboard
+   */
+  private async copyContactPublicKey(contact: Contact): Promise<void> {
+    try {
+      const clipboardy = (await import('clipboardy')).default
+      await clipboardy.write(contact.public_key)
+      console.log(chalk.green('\n✓ Public key copied to clipboard!\n'))
+    } catch (error) {
+      console.log(chalk.red('\n✗ Failed to copy to clipboard\n'))
+      console.log(chalk.gray('Public key:'))
+      console.log(contact.public_key)
+      console.log()
+    }
+  }
+
+  /**
+   * View contact's public key
+   */
+  private async viewContactPublicKey(contact: Contact): Promise<void> {
+    console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
+    console.log(chalk.blue('║') + '  📄 Public Key                     ' + chalk.blue('║'))
+    console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
+    console.log(contact.public_key)
+    console.log()
+
+    await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'continue',
+        message: chalk.cyan('Press Enter to continue...'),
+      },
+    ])
+  }
+
+  /**
+   * Rename a contact
+   */
+  private async renameContact(contact: Contact): Promise<void> {
+    const { newName } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'newName',
+        message: 'Enter new name:',
+        default: contact.name,
+        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+      },
+    ])
+
+    this.db.update('contact', { key: 'id', value: contact.id }, { name: newName.trim() })
+    console.log(chalk.green('\n✓ Contact renamed!\n'))
+  }
+
+  /**
+   * Edit contact notes
+   */
+  private async editContactNotes(contact: Contact): Promise<void> {
+    const { notes } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'notes',
+        message: 'Enter notes:',
+        default: contact.notes || '',
+      },
+    ])
+
+    this.db.update('contact', { key: 'id', value: contact.id }, { notes: notes.trim() || null })
+    console.log(chalk.green('\n✓ Notes updated!\n'))
+  }
+
+  /**
+   * Toggle contact trust status
+   */
+  private async toggleContactTrust(contact: Contact): Promise<void> {
+    const newTrustStatus = !contact.trusted
+    this.db.update('contact', { key: 'id', value: contact.id }, {
+      trusted: newTrustStatus,
+      last_verified_at: newTrustStatus ? new Date().toISOString() : contact.last_verified_at
+    })
+    console.log(chalk.green(`\n✓ Contact marked as ${newTrustStatus ? 'trusted' : 'untrusted'}!\n`))
+  }
+
+  /**
+   * Delete a contact
+   */
+  private async deleteContact(contactId: number): Promise<boolean> {
+    const { confirm } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: chalk.red('Are you sure? This action cannot be undone.'),
+        default: false,
+      },
+    ])
+
+    if (confirm) {
+      this.db.delete('contact', { key: 'id', value: contactId })
+      console.log(chalk.green('\n✓ Contact deleted.\n'))
+      return true
+    }
+    return false
   }
 }
