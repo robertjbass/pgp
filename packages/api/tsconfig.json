@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "paths": {
+      "@pgp/shared": ["../shared/src/index.ts"]
+    },
+    "skipLibCheck": true
+  },
+  "include": ["api/**/*"]
+}

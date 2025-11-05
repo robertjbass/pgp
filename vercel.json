@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "buildCommand": "pnpm --filter @pgp/shared build",
+  "installCommand": "pnpm install",
+  "outputDirectory": "packages/api/public",
+  "functions": {
+    "packages/api/api/**/*.ts": {
+      "runtime": "@vercel/node@latest"
+    }
+  }
+}
