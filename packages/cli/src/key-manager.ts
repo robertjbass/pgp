@@ -701,7 +701,7 @@ export class KeyManager {
           { name: '✏️  Rename key', value: 'rename' },
           { name: '⭐ Set as default', value: 'set-default' },
           { name: '🗑️  Delete key', value: 'delete' },
-          { name: '← Back', value: 'back' },
+          { name: '← Back to key list', value: 'back' },
         ],
       },
     ])
