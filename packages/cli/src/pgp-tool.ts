@@ -8,6 +8,7 @@ import { stdin as input, stdout as output } from 'process'
 import clipboardy from 'clipboardy'
 import { Db } from './db.js'
 import { KeyManager } from './key-manager.js'
+import { extractPublicKeyInfo } from './key-utils.js'
 
 // Initialize database and key manager
 const db = new Db()
@@ -331,15 +332,62 @@ async function main() {
       }
 
       let recipientPublicKey: string | undefined
+      let isNewContact = false
 
       // If encrypting for someone else, get their public key
       if (recipient === 'other') {
-        const publicKey = await getRecipientPublicKey()
-        if (!publicKey) {
-          console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
-          return main()
+        // Check if there are any saved contacts
+        const contacts = db.select({ table: 'contact' })
+
+        if (contacts.length > 0) {
+          // Offer saved contacts or new key
+          const contactChoices: Array<{ name: string; value: number | string }> = contacts.map((c) => ({
+            name: `${c.name} <${c.email}>`,
+            value: c.id,
+          }))
+          contactChoices.push(
+            { name: '➕ Use a new public key', value: 'new' },
+            { name: '← Back', value: 'back' }
+          )
+
+          const { contactChoice } = await inquirer.prompt([
+            {
+              type: 'list',
+              name: 'contactChoice',
+              message: chalk.yellow('Select a contact or enter a new key:'),
+              choices: contactChoices,
+            },
+          ])
+
+          if (contactChoice === 'back') {
+            return main()
+          }
+
+          if (contactChoice === 'new') {
+            const publicKey = await getRecipientPublicKey()
+            if (!publicKey) {
+              console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
+              return main()
+            }
+            recipientPublicKey = publicKey
+            isNewContact = true
+          } else {
+            // Use saved contact
+            const selectedContact = contacts.find((c) => c.id === contactChoice)
+            if (selectedContact) {
+              recipientPublicKey = selectedContact.public_key
+            }
+          }
+        } else {
+          // No saved contacts, get new key
+          const publicKey = await getRecipientPublicKey()
+          if (!publicKey) {
+            console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
+            return main()
+          }
+          recipientPublicKey = publicKey
+          isNewContact = true
         }
-        recipientPublicKey = publicKey
       }
 
       // Detect available editors
@@ -479,6 +527,70 @@ async function main() {
         console.log(
           chalk.yellow('\n⚠️  Could not copy to clipboard automatically\n')
         )
+      }
+
+      // Offer to save the contact if it's a new public key
+      if (isNewContact && recipientPublicKey) {
+        const { saveContact } = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'saveContact',
+            message: chalk.yellow('Would you like to save this contact for future use?'),
+            default: true,
+          },
+        ])
+
+        if (saveContact) {
+          try {
+            // Extract key information
+            const keyInfo = await extractPublicKeyInfo(recipientPublicKey)
+
+            // Prompt for contact name
+            const defaultName = (keyInfo.email || 'unknown').split('@')[0] || 'Contact'
+            const answers = await inquirer.prompt([
+              {
+                type: 'input',
+                name: 'contactName',
+                message: 'Contact name:',
+                default: defaultName,
+                validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+              },
+            ])
+            const contactName = answers.contactName as string
+
+            // Check if contact already exists by fingerprint
+            const existingContacts = db.select({
+              table: 'contact',
+              where: { key: 'fingerprint', compare: 'is', value: keyInfo.fingerprint },
+            })
+
+            if (existingContacts.length > 0) {
+              console.log(chalk.yellow('\n⚠️  This contact already exists.\n'))
+            } else {
+              // Save the contact
+              db.insert('contact', {
+                name: contactName.trim(),
+                email: keyInfo.email,
+                fingerprint: keyInfo.fingerprint,
+                public_key: recipientPublicKey,
+                algorithm: keyInfo.algorithm,
+                key_size: keyInfo.keySize,
+                trusted: false,
+                last_verified_at: null,
+                notes: null,
+                expires_at: keyInfo.expiresAt,
+                revoked: false,
+              })
+
+              console.log(chalk.green(`\n✓ Contact "${contactName}" saved successfully!\n`))
+            }
+          } catch (error) {
+            console.log(
+              chalk.red('\n❌ Failed to save contact:'),
+              error instanceof Error ? error.message : error
+            )
+          }
+        }
       }
     } catch (error) {
       console.log(
