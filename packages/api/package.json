@@ -5,11 +5,9 @@
   "type": "module",
   "main": "api/encrypt.js",
   "scripts": {
-    "build": "echo 'No build needed - Vercel compiles TypeScript automatically'",
-    "serve": "vercel dev"
+    "build": "echo 'No build needed - Vercel compiles TypeScript automatically'"
   },
   "dependencies": {
-    "@pgp/shared": "workspace:*",
     "@vercel/node": "^3.2.27",
     "openpgp": "^6.2.2"
   },

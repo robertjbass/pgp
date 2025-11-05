@@ -6,11 +6,10 @@ A monorepo containing a PGP encryption CLI tool and web interface. Built with No
 
 ## 📦 What's Inside
 
-This is a **pnpm workspace monorepo** with three packages:
+This is a **pnpm workspace monorepo** with two packages:
 
 - **`@pgp/cli`** - Interactive CLI tool for PGP encryption/decryption with SQLite key management
 - **`@pgp/api`** - Web interface + serverless API deployed to Vercel (works without JavaScript)
-- **`@pgp/shared`** - Shared PGP encryption utilities
 
 See [MONOREPO.md](MONOREPO.md) for detailed documentation.
 
