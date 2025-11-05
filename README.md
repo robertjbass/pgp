@@ -1,8 +1,18 @@
-# 🔐 Layerbase PGP - PGP Encryption CLI Tool
+# 🔐 Layerbase PGP
 
 > **Note:** This is a personal side project created to learn more about encryption, PGP, and implementing secure web applications that work without JavaScript. It's a work in progress and should be used for educational purposes.
 
-A beautiful, interactive command-line tool for encrypting and decrypting messages using PGP (Pretty Good Privacy). Built with Node.js and TypeScript, Layerbase PGP provides a user-friendly interface for secure message encryption with multiple input methods and cross-platform support.
+A monorepo containing a PGP encryption CLI tool and web interface. Built with Node.js, TypeScript, and Vercel serverless functions.
+
+## 📦 What's Inside
+
+This is a **pnpm workspace monorepo** with three packages:
+
+- **`@pgp/cli`** - Interactive CLI tool for PGP encryption/decryption with SQLite key management
+- **`@pgp/api`** - Web interface + serverless API deployed to Vercel (works without JavaScript)
+- **`@pgp/shared`** - Shared PGP encryption utilities
+
+See [MONOREPO.md](MONOREPO.md) for detailed documentation.
 
 ## ⚠️ Project Status
 

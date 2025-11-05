@@ -1,34 +1,34 @@
 {
   "name": "layerbase-pgp",
   "version": "1.0.0",
-  "description": "A beautiful, interactive CLI tool for PGP encryption/decryption with SQLite key management",
-  "main": "index.js",
+  "description": "PGP encryption/decryption monorepo with CLI, API, and web frontend",
+  "private": true,
   "type": "module",
-  "scripts": {
-    "serve": "nodemon --watch src --ext ts --exec 'tsx --env-file=.env src/index.ts'",
-    "pgp": "tsx --env-file=.env src/pgp-tool.ts",
-    "format": "prettier --write .",
-    "build": "tsc && cp src/schema.sql dist/schema.sql",
-    "start": "node dist/index.js"
-  },
-  "keywords": ["pgp", "encryption", "openpgp", "cli", "security", "privacy"],
-  "author": "",
-  "license": "SEE LICENSE IN LICENSE",
   "packageManager": "pnpm@10.19.0",
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24.9.2",
-    "nodemon": "^3.1.10",
-    "prettier": "^3.6.2",
-    "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+  "scripts": {
+    "pgp": "pnpm --filter @pgp/cli dev",
+    "serve": "cd packages/api && vercel dev --listen 3000",
+    "deploy": "vercel --prod",
+    "build": "pnpm -r build",
+    "rebuild": "pnpm clean && pnpm install && pnpm build",
+    "build:shared": "pnpm --filter @pgp/shared build",
+    "build:cli": "pnpm --filter @pgp/cli build",
+    "format": "prettier --write .",
+    "clean": "rm -rf packages/*/dist packages/*/node_modules node_modules"
   },
-  "dependencies": {
-    "@types/inquirer": "^9.0.9",
-    "better-sqlite3": "^12.4.1",
-    "chalk": "^5.6.2",
-    "clipboardy": "^5.0.0",
-    "inquirer": "^12.10.0",
-    "openpgp": "^6.2.2"
+  "keywords": [
+    "pgp",
+    "encryption",
+    "openpgp",
+    "cli",
+    "security",
+    "privacy",
+    "monorepo"
+  ],
+  "author": "Bob Bass",
+  "license": "SEE LICENSE IN LICENSE",
+  "devDependencies": {
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3"
   }
 }

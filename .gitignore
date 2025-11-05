@@ -148,3 +148,10 @@ db/*.db
 db/*.db-shm
 db/*.db-wal
 db/*.json
+
+# Monorepo build outputs
+packages/*/dist
+packages/*/node_modules
+
+# Vercel
+.vercel

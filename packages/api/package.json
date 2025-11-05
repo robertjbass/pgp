@@ -1,0 +1,21 @@
+{
+  "name": "@pgp/api",
+  "version": "1.0.0",
+  "description": "Serverless API for PGP encryption",
+  "type": "module",
+  "main": "api/encrypt.js",
+  "scripts": {
+    "build": "echo 'No build needed - Vercel compiles TypeScript automatically'",
+    "serve": "vercel dev"
+  },
+  "dependencies": {
+    "@pgp/shared": "workspace:*",
+    "@vercel/node": "^3.2.27",
+    "openpgp": "^6.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.2",
+    "typescript": "^5.9.3",
+    "vercel": "^48.8.2"
+  }
+}
