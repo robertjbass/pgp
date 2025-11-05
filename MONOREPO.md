@@ -1,24 +1,8 @@
 # Monorepo Structure
 
-This project is organized as a **pnpm workspace monorepo** with three packages:
+This project is organized as a **pnpm workspace monorepo** with two packages:
 
 ## Packages
-
-### 📦 `@pgp/shared`
-**Location:** `packages/shared/`
-
-Shared PGP encryption/decryption utilities used by both CLI and API.
-
-**Exports:**
-- `encryptMessage(message: string, publicKeyArmored: string): Promise<string>`
-- `decryptMessage(encryptedMessage: string, privateKeyArmored: string, passphrase: string): Promise<string>`
-
-**Scripts:**
-```bash
-pnpm build:shared
-```
-
----
 
 ### 🖥️ `@pgp/cli`
 **Location:** `packages/cli/`
@@ -31,7 +15,7 @@ Interactive CLI tool for PGP operations with SQLite key management.
 pnpm pgp
 
 # Build the CLI
-pnpm build:cli
+pnpm build
 ```
 
 **Features:**
@@ -39,10 +23,17 @@ pnpm build:cli
 - SQLite database for key management
 - Multiple input methods (clipboard, editor, inline)
 - Passphrase-protected private keys
+- Self-contained encryption/decryption utilities
 
 **Dependencies:**
-- `@pgp/shared` (workspace package)
 - inquirer, chalk, clipboardy, better-sqlite3, openpgp
+
+**Internal Modules:**
+- `src/encrypt.ts` - PGP encryption utility
+- `src/decrypt.ts` - PGP decryption utility
+- `src/pgp-tool.ts` - Main CLI application
+- `src/db.ts` - SQLite database layer
+- `src/schema.sql` - Database schema
 
 ---
 
@@ -58,7 +49,7 @@ packages/api/
 │   └── encrypt.ts          # POST /api/encrypt serverless function
 ├── public/
 │   └── index.html          # Static HTML form (no JS required)
-└── vercel.json             # Vercel configuration
+└── tsconfig.json           # TypeScript configuration
 ```
 
 **Endpoints:**
@@ -71,8 +62,8 @@ packages/api/
 # Run locally (from root)
 pnpm serve
 
-# Deploy to Vercel
-pnpm deploy
+# Deploy to Vercel (from root)
+pnpm deploy:vercel
 ```
 
 **Features:**
@@ -80,11 +71,11 @@ pnpm deploy
 - Form-based encryption with POST
 - CORS enabled for API access
 - Handles both JSON and form-encoded data
+- Modern, beautiful UI with pure CSS
 
 **Dependencies:**
-- `@pgp/shared` (workspace package)
 - `@vercel/node` - Vercel runtime
-- `openpgp` - PGP operations
+- `openpgp` - PGP operations (encryption logic inlined in serverless function)
 
 ---
 
@@ -100,17 +91,13 @@ pnpm pgp
 pnpm serve
 
 # Deploy web interface to Vercel
-pnpm deploy
+pnpm deploy:vercel
 
-# Build all packages
+# Build CLI package
 pnpm build
 
 # Clean rebuild (remove everything and rebuild)
 pnpm rebuild
-
-# Build specific packages
-pnpm build:shared
-pnpm build:cli
 
 # Format all code
 pnpm format
@@ -126,8 +113,8 @@ pnpm clean
 # Install dependencies for all packages
 pnpm install
 
-# Build the shared package (required first)
-pnpm build:shared
+# No build required for API - Vercel compiles TypeScript automatically
+# CLI can be run directly with tsx
 ```
 
 ### 2. Local Development
@@ -149,7 +136,7 @@ pnpm serve
 
 **Deploy to Vercel:**
 ```bash
-pnpm deploy
+pnpm deploy:vercel
 ```
 
 This deploys from the monorepo root and serves:
@@ -164,16 +151,12 @@ packages:
   - 'packages/*'
 ```
 
-**Package Dependencies:**
+**Package Independence:**
 
-The CLI and API depend on the shared package using workspace protocol:
-```json
-"dependencies": {
-  "@pgp/shared": "workspace:*"
-}
-```
-
-This creates a local symlink to the shared package during development.
+Both packages are self-contained:
+- CLI has its own encryption/decryption utilities in `src/`
+- API has encryption logic inlined in the serverless function
+- No shared dependencies between packages
 
 ## TypeScript Configuration
 
@@ -182,8 +165,6 @@ The monorepo uses **TypeScript project references** for type safety:
 - **Root `tsconfig.json`**: References all packages
 - **`tsconfig.base.json`**: Shared compiler options
 - **Package `tsconfig.json`**: Extends base config with package-specific settings
-
-The shared package has `"composite": true` to support project references.
 
 ## Project Structure
 
@@ -196,18 +177,15 @@ pgp/
 │   │   ├── public/
 │   │   │   └── index.html    # Static HTML
 │   │   ├── package.json
-│   │   ├── tsconfig.json
-│   │   └── vercel.json
-│   ├── cli/                  # CLI tool
-│   │   ├── src/
-│   │   ├── db/               # SQLite database
-│   │   ├── package.json
 │   │   └── tsconfig.json
-│   └── shared/               # Shared utilities
+│   └── cli/                  # CLI tool
 │       ├── src/
-│       │   ├── encrypt.ts
-│       │   ├── decrypt.ts
-│       │   └── index.ts
+│       │   ├── encrypt.ts    # Encryption utility
+│       │   ├── decrypt.ts    # Decryption utility
+│       │   ├── pgp-tool.ts   # Main CLI app
+│       │   ├── db.ts         # Database layer
+│       │   └── schema.sql    # DB schema
+│       ├── db/               # SQLite database
 │       ├── package.json
 │       └── tsconfig.json
 ├── package.json              # Root workspace
@@ -223,14 +201,14 @@ pgp/
 ### CLI
 The CLI is not deployed - it runs locally. You can:
 - Use it directly with `pnpm pgp`
-- Build and distribute with `pnpm build:cli`
+- Build and distribute with `pnpm build`
 - Package for npm publishing
 
 ### Web Interface (API + HTML)
 Deploy to Vercel from the monorepo root:
 
 ```bash
-pnpm deploy
+pnpm deploy:vercel
 ```
 
 **What gets deployed:**
@@ -240,9 +218,9 @@ pnpm deploy
 
 **Vercel Configuration:**
 - Detects pnpm workspace automatically
-- Builds shared package first
 - Compiles TypeScript serverless functions
 - Serves static files from `outputDirectory`
+- No build step required (Vercel handles TypeScript compilation)
 
 ## Progressive Enhancement (Future)
 
@@ -251,19 +229,19 @@ The HTML form currently works without JavaScript. Future enhancements:
 - Real-time "encrypt as you type" (progressive enhancement)
 - Still fallback to server-side for browsers with JavaScript disabled
 
-## Migration Notes
+## Architecture Notes
 
-### What Changed
+### Why No Shared Package?
 
-1. **Monorepo Structure**: Code split into logical packages
-2. **Shared Logic**: Common PGP operations extracted to `@pgp/shared`
-3. **API Package**: New Vercel serverless function for encryption
-4. **Frontend Integrated**: HTML moved into API package's `public/` folder
-5. **Root Package**: Private workspace root with aggregated scripts
+Initially, this monorepo had a `@pgp/shared` package for common encryption utilities. We removed it because:
 
-### What Stayed the Same
+1. **Vercel Deployment Simplicity**: Serverless functions work best when self-contained
+2. **No Code Duplication**: The encryption logic is simple enough to inline
+3. **Independent Packages**: CLI and API serve different purposes and don't need to share code
+4. **Build Simplification**: No need to build shared package before deploying
 
-- CLI functionality is identical
-- Database structure unchanged
-- All dependencies preserved
-- Build process compatible with existing workflows
+The encryption/decryption logic is:
+- In `packages/cli/src/encrypt.ts` and `decrypt.ts` for CLI
+- Inlined in `packages/api/api/encrypt.ts` for the serverless function
+
+This keeps both packages independent and easy to deploy.

@@ -2,7 +2,6 @@
   // Root tsconfig for monorepo - references all packages
   "files": [],
   "references": [
-    { "path": "./packages/shared" },
     { "path": "./packages/cli" },
     { "path": "./packages/api" }
   ]

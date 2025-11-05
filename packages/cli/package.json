@@ -13,7 +13,6 @@
     "start": "node --env-file=../../.env dist/pgp-tool.js"
   },
   "dependencies": {
-    "@pgp/shared": "workspace:*",
     "@types/inquirer": "^9.0.9",
     "better-sqlite3": "^12.4.1",
     "chalk": "^5.6.2",
