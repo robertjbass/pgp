@@ -8,7 +8,7 @@
   "scripts": {
     "pgp": "pnpm --filter @pgp/cli dev",
     "serve": "cd packages/api && vercel dev --listen 3000",
-    "deploy": "vercel --prod",
+    "deploy:vercel": "vercel --prod",
     "build": "pnpm -r build",
     "rebuild": "pnpm clean && pnpm install && pnpm build",
     "build:shared": "pnpm --filter @pgp/shared build",
