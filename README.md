@@ -1,5 +1,8 @@
 # 🔐 Layerbase PGP
 
+- [PGP Web Encrypt Client - (no JavaScript)](https://pgp-encrypt.vercel.app)- [PGP Web - PGP Web Encrypt Client - (with JavaScript) (TBD)
+- [CLI Tool](https://github.com/robertjbass/pgp)
+
 > **Note:** This is a personal side project created to learn more about encryption, PGP, and implementing secure web applications that work without JavaScript. It's a work in progress and should be used for educational purposes.
 
 A monorepo containing a PGP encryption CLI tool and web interface. Built with Node.js, TypeScript, and Vercel serverless functions.
@@ -56,6 +59,7 @@ cd layerbase-pgp
 ```
 
 The installer will:
+
 - Detect your operating system and shell
 - Check for Node.js and install it if missing (using nvm)
 - Check for pnpm and install it if missing
@@ -86,6 +90,7 @@ pnpm install
 ```
 
 This will install all Node.js dependencies including `better-sqlite3`, which requires native compilation. The installation process automatically:
+
 - Compiles the SQLite native module for your platform
 - Sets up the project dependencies
 - Prepares the development environment
@@ -111,6 +116,7 @@ pnpm build
 5. Database initialization:
 
 The SQLite database is automatically created on first run. No manual setup required! When you first start the application, it will:
+
 - Create the `db/` directory
 - Initialize an empty SQLite database with all tables
 - Set up default settings
@@ -244,6 +250,7 @@ The source code is publicly available to promote transparency, enable security a
 ---
 
 **Learning Focus:** This project explores:
+
 - PGP encryption and cryptography fundamentals
 - Node.js CLI development with TypeScript
 - Security best practices for handling sensitive data
