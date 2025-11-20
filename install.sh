@@ -195,6 +195,17 @@ install_dependencies() {
         exit 1
     fi
 
+    # Create .npmrc if it doesn't exist (required for native module builds)
+    if [ ! -f ".npmrc" ]; then
+        print_info "Creating .npmrc configuration..."
+        cat > .npmrc << EOF
+enable-pre-post-scripts=true
+only-built-dependencies[]=better-sqlite3
+only-built-dependencies[]=esbuild
+EOF
+        print_success ".npmrc created"
+    fi
+
     pnpm install
     print_success "Dependencies installed successfully"
 }
