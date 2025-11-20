@@ -8,9 +8,9 @@
     "pgp": "./dist/pgp-tool.js"
   },
   "scripts": {
-    "dev": "tsx --env-file=../../.env src/pgp-tool.ts",
+    "dev": "tsx src/pgp-tool.ts",
     "build": "tsc && cp src/schema.sql dist/schema.sql",
-    "start": "node --env-file=../../.env dist/pgp-tool.js"
+    "start": "node dist/pgp-tool.js"
   },
   "dependencies": {
     "@types/inquirer": "^9.0.9",
