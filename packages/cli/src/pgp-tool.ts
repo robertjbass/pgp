@@ -10,6 +10,9 @@ import { Db } from './db.js'
 import { KeyManager } from './key-manager.js'
 import { extractPublicKeyInfo } from './key-utils.js'
 
+// Config to allow weak keys like DSA (not recommended for production)
+const weakKeyConfig = { rejectPublicKeyAlgorithms: new Set() }
+
 // Initialize database and key manager
 const db = new Db()
 const keyManager = new KeyManager(db)
@@ -28,14 +31,14 @@ async function encryptMessage(message: string, publicKeyArmored?: string): Promi
 
   if (publicKeyArmored) {
     // Use provided public key (someone else's key)
-    publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored })
+    publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored, config: weakKeyConfig })
   } else {
     // Use default keypair's public key (encrypt to self)
     const defaultKeypair = await keyManager.getDefaultKeypair()
     if (!defaultKeypair) {
       throw new Error('No default keypair found. Please set up a keypair first.')
     }
-    publicKey = await openpgp.readKey({ armoredKey: defaultKeypair.public_key })
+    publicKey = await openpgp.readKey({ armoredKey: defaultKeypair.public_key, config: weakKeyConfig })
 
     // Update last_used_at
     db.update('keypair', { key: 'id', value: defaultKeypair.id }, { last_used_at: new Date().toISOString() })
@@ -44,6 +47,7 @@ async function encryptMessage(message: string, publicKeyArmored?: string): Promi
   const encrypted = await openpgp.encrypt({
     message: await openpgp.createMessage({ text: message }),
     encryptionKeys: publicKey,
+    config: weakKeyConfig,
   })
 
   return encrypted as string
@@ -76,7 +80,7 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
       // Validate the passphrase by attempting to decrypt the key
       try {
         await openpgp.decryptKey({
-          privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key }),
+          privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key, config: weakKeyConfig }),
           passphrase,
         })
         // If successful, cache the passphrase
@@ -88,7 +92,7 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
   }
 
   const privateKey = await openpgp.decryptKey({
-    privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key }),
+    privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key, config: weakKeyConfig }),
     passphrase,
   })
 
@@ -233,7 +237,7 @@ async function getRecipientPublicKey(): Promise<string | null> {
 
   // Try to read the key to validate it
   try {
-    await openpgp.readKey({ armoredKey: publicKey })
+    await openpgp.readKey({ armoredKey: publicKey, config: weakKeyConfig })
     console.log(chalk.green('\n✓ Valid public key\n'))
     return publicKey
   } catch (error) {
@@ -293,7 +297,7 @@ async function main() {
 
   if (action === 'exit') {
     clearPassphraseCache()
-    console.log(chalk.green('\n✨ Goodbye!\n'))
+    console.clear()
     process.exit(0)
   }
 
@@ -331,6 +335,8 @@ async function main() {
         return main()
       }
 
+      // Note: No 'main-menu' option here since 'back' already goes to main menu
+
       let recipientPublicKey: string | undefined
       let isNewContact = false
 
@@ -347,7 +353,8 @@ async function main() {
           }))
           contactChoices.push(
             { name: '➕ Use a new public key', value: 'new' },
-            { name: '← Back', value: 'back' }
+            { name: '← Back', value: 'back' },
+            { name: '🏠 Main menu', value: 'main-menu' }
           )
 
           const { contactChoice } = await inquirer.prompt([
@@ -360,6 +367,11 @@ async function main() {
           ])
 
           if (contactChoice === 'back') {
+            // Go back to recipient selection - re-run encrypt flow
+            return main()
+          }
+
+          if (contactChoice === 'main-menu') {
             return main()
           }
 
@@ -420,10 +432,16 @@ async function main() {
         })
       }
 
-      // Add back to main menu option
+      // Add back option
       inputChoices.push({
-        name: '← Back to main menu',
+        name: '← Back',
         value: 'back',
+      })
+
+      // Add main menu option
+      inputChoices.push({
+        name: '🏠 Main menu',
+        value: 'main-menu',
       })
 
       const { inputMethod } = await inquirer.prompt([
@@ -436,6 +454,11 @@ async function main() {
       ])
 
       if (inputMethod === 'back') {
+        // Go back to recipient selection
+        return main()
+      }
+
+      if (inputMethod === 'main-menu') {
         return main()
       }
 
@@ -632,10 +655,16 @@ async function main() {
         })
       }
 
-      // Add back to main menu option
+      // Add back option (for decrypt, back goes to main menu since there's no prior submenu)
       inputChoices.push({
         name: '← Back to main menu',
         value: 'back',
+      })
+
+      // Add main menu option
+      inputChoices.push({
+        name: '🏠 Main menu',
+        value: 'main-menu',
       })
 
       const { inputMethod } = await inquirer.prompt([
@@ -649,7 +678,7 @@ async function main() {
         },
       ])
 
-      if (inputMethod === 'back') {
+      if (inputMethod === 'back' || inputMethod === 'main-menu') {
         return main()
       }
 
@@ -786,14 +815,14 @@ async function main() {
     await main()
   } else {
     clearPassphraseCache()
-    console.log(chalk.green('\n✨ Goodbye!\n'))
+    console.clear()
   }
 }
 
 // Graceful exit on Ctrl+C
 process.on('SIGINT', () => {
   clearPassphraseCache()
-  console.log(chalk.green('\n\n👋 Goodbye!\n'))
+  console.clear()
   process.exit(0)
 })
 
@@ -801,11 +830,12 @@ main().catch((error) => {
   // Handle Ctrl+C gracefully (inquirer throws ExitPromptError)
   if (error.message && error.message.includes('force closed the prompt')) {
     clearPassphraseCache()
-    console.log(chalk.green('\n👋 Goodbye!\n'))
+    console.clear()
     process.exit(0)
   }
 
   clearPassphraseCache()
+  console.clear()
   console.error(chalk.red('\n❌ Error:'), error.message || error)
   process.exit(1)
 })
