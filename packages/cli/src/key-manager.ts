@@ -475,11 +475,12 @@ export class KeyManager {
             value: index,
           })),
           { name: '← Cancel', value: -1 },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
 
-    if (selectedIndex === -1) {
+    if (selectedIndex === -1 || selectedIndex === 'main-menu') {
       return
     }
 
@@ -605,7 +606,7 @@ export class KeyManager {
   /**
    * Show key management menu
    */
-  async showKeyManagementMenu(): Promise<void> {
+  async showKeyManagementMenu(): Promise<'back' | 'main-menu' | void> {
     const { action } = await inquirer.prompt([
       {
         type: 'list',
@@ -618,17 +619,20 @@ export class KeyManager {
           { name: '💻 Import from System GPG', value: 'import-gpg' },
           { name: '🔐 Generate new keypair', value: 'generate' },
           { name: '← Back to main menu', value: 'back' },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
 
     switch (action) {
       case 'view':
-        await this.viewAndManageKeys()
+        const viewResult = await this.viewAndManageKeys()
+        if (viewResult === 'main-menu') return 'main-menu'
         await this.showKeyManagementMenu()
         break
       case 'contacts':
-        await this.viewAndManageContacts()
+        const contactsResult = await this.viewAndManageContacts()
+        if (contactsResult === 'main-menu') return 'main-menu'
         await this.showKeyManagementMenu()
         break
       case 'import':
@@ -644,6 +648,7 @@ export class KeyManager {
         await this.showKeyManagementMenu()
         break
       case 'back':
+      case 'main-menu':
         return
     }
   }
@@ -651,7 +656,7 @@ export class KeyManager {
   /**
    * View and manage individual keys
    */
-  private async viewAndManageKeys(): Promise<void> {
+  private async viewAndManageKeys(): Promise<'main-menu' | void> {
     const keypairs = this.db.select({ table: 'keypair' })
 
     if (keypairs.length === 0) {
@@ -670,9 +675,14 @@ export class KeyManager {
             value: kp.id,
           })),
           { name: '← Back', value: null },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
+
+    if (keypairId === 'main-menu') {
+      return 'main-menu'
+    }
 
     if (keypairId === null) {
       return
@@ -681,13 +691,14 @@ export class KeyManager {
     const selectedKeypair = keypairs.find((kp) => kp.id === keypairId)
     if (!selectedKeypair) return
 
-    await this.manageIndividualKey(selectedKeypair)
+    const result = await this.manageIndividualKey(selectedKeypair)
+    if (result === 'main-menu') return 'main-menu'
   }
 
   /**
    * Manage an individual key
    */
-  private async manageIndividualKey(keypair: Keypair): Promise<void> {
+  private async manageIndividualKey(keypair: Keypair): Promise<'main-menu' | void> {
     // Display key information
     console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
     console.log(chalk.blue('║') + '  🔑  Key Details                   ' + chalk.blue('║'))
@@ -707,6 +718,7 @@ export class KeyManager {
           { name: '⭐ Set as default', value: 'set-default' },
           { name: '🗑️  Delete key', value: 'delete' },
           { name: '← Back to key list', value: 'back' },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
@@ -714,12 +726,10 @@ export class KeyManager {
     switch (action) {
       case 'copy-public':
         await this.copyPublicKey(keypair)
-        await this.manageIndividualKey(keypair)
-        break
+        return this.manageIndividualKey(keypair)
       case 'export':
         await this.exportKeypair(keypair)
-        await this.manageIndividualKey(keypair)
-        break
+        return this.manageIndividualKey(keypair)
       case 'rename':
         await this.renameKeypair(keypair)
         // Refresh keypair data after rename
@@ -727,7 +737,7 @@ export class KeyManager {
           table: 'keypair',
           where: { key: 'id', compare: 'is', value: keypair.id },
         })[0]
-        if (updated) await this.manageIndividualKey(updated)
+        if (updated) return this.manageIndividualKey(updated)
         break
       case 'set-default':
         await this.setDefaultKeypairById(keypair.id)
@@ -736,14 +746,16 @@ export class KeyManager {
           table: 'keypair',
           where: { key: 'id', compare: 'is', value: keypair.id },
         })[0]
-        if (refreshed) await this.manageIndividualKey(refreshed)
+        if (refreshed) return this.manageIndividualKey(refreshed)
         break
       case 'delete':
         const deleted = await this.deleteKeypairById(keypair.id)
         if (!deleted) {
-          await this.manageIndividualKey(keypair)
+          return this.manageIndividualKey(keypair)
         }
         break
+      case 'main-menu':
+        return 'main-menu'
       case 'back':
         return
     }
@@ -778,11 +790,12 @@ export class KeyManager {
           { name: '🔓 Public key only', value: 'public' },
           { name: '🔐 Both public and private keys', value: 'both' },
           { name: '← Cancel', value: 'cancel' },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
 
-    if (exportType === 'cancel') return
+    if (exportType === 'cancel' || exportType === 'main-menu') return
 
     const { exportMethod } = await inquirer.prompt([
       {
@@ -793,11 +806,12 @@ export class KeyManager {
           { name: '📋 Copy to clipboard', value: 'clipboard' },
           { name: '🖥️  Display on screen', value: 'display' },
           { name: '← Cancel', value: 'cancel' },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
 
-    if (exportMethod === 'cancel') return
+    if (exportMethod === 'cancel' || exportMethod === 'main-menu') return
 
     let content = ''
     if (exportType === 'public') {
@@ -1006,7 +1020,7 @@ export class KeyManager {
   /**
    * View and manage contacts
    */
-  private async viewAndManageContacts(): Promise<void> {
+  private async viewAndManageContacts(): Promise<'main-menu' | void> {
     const contacts = this.db.select({ table: 'contact' })
 
     if (contacts.length === 0) {
@@ -1025,9 +1039,14 @@ export class KeyManager {
             value: c.id,
           })),
           { name: '← Back', value: null },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
+
+    if (contactId === 'main-menu') {
+      return 'main-menu'
+    }
 
     if (contactId === null) {
       return
@@ -1036,13 +1055,14 @@ export class KeyManager {
     const selectedContact = contacts.find((c) => c.id === contactId)
     if (!selectedContact) return
 
-    await this.manageIndividualContact(selectedContact)
+    const result = await this.manageIndividualContact(selectedContact)
+    if (result === 'main-menu') return 'main-menu'
   }
 
   /**
    * Manage an individual contact
    */
-  private async manageIndividualContact(contact: Contact): Promise<void> {
+  private async manageIndividualContact(contact: Contact): Promise<'main-menu' | void> {
     // Display contact information
     console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
     console.log(chalk.blue('║') + '  👤 Contact Details                ' + chalk.blue('║'))
@@ -1073,6 +1093,7 @@ export class KeyManager {
           { name: '⭐ Toggle trust', value: 'toggle-trust' },
           { name: '🗑️  Delete contact', value: 'delete' },
           { name: '← Back to contact list', value: 'back' },
+          { name: '🏠 Main menu', value: 'main-menu' },
         ],
       },
     ])
@@ -1080,19 +1101,17 @@ export class KeyManager {
     switch (action) {
       case 'copy-public':
         await this.copyContactPublicKey(contact)
-        await this.manageIndividualContact(contact)
-        break
+        return this.manageIndividualContact(contact)
       case 'view-public':
         await this.viewContactPublicKey(contact)
-        await this.manageIndividualContact(contact)
-        break
+        return this.manageIndividualContact(contact)
       case 'rename':
         await this.renameContact(contact)
         const updated = this.db.select({
           table: 'contact',
           where: { key: 'id', compare: 'is', value: contact.id },
         })[0]
-        if (updated) await this.manageIndividualContact(updated)
+        if (updated) return this.manageIndividualContact(updated)
         break
       case 'edit-notes':
         await this.editContactNotes(contact)
@@ -1100,7 +1119,7 @@ export class KeyManager {
           table: 'contact',
           where: { key: 'id', compare: 'is', value: contact.id },
         })[0]
-        if (updatedNotes) await this.manageIndividualContact(updatedNotes)
+        if (updatedNotes) return this.manageIndividualContact(updatedNotes)
         break
       case 'toggle-trust':
         await this.toggleContactTrust(contact)
@@ -1108,14 +1127,16 @@ export class KeyManager {
           table: 'contact',
           where: { key: 'id', compare: 'is', value: contact.id },
         })[0]
-        if (refreshed) await this.manageIndividualContact(refreshed)
+        if (refreshed) return this.manageIndividualContact(refreshed)
         break
       case 'delete':
         const deleted = await this.deleteContact(contact.id)
         if (!deleted) {
-          await this.manageIndividualContact(contact)
+          return this.manageIndividualContact(contact)
         }
         break
+      case 'main-menu':
+        return 'main-menu'
       case 'back':
         return
     }

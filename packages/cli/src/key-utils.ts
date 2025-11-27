@@ -4,6 +4,9 @@ import type { Keypair } from './db.js'
 /**
  * Extract key information from a PGP public key
  */
+// Config to allow weak keys like DSA (not recommended for production)
+const weakKeyConfig = { rejectPublicKeyAlgorithms: new Set() }
+
 export async function extractPublicKeyInfo(armoredKey: string): Promise<{
   fingerprint: string
   email: string
@@ -16,7 +19,7 @@ export async function extractPublicKeyInfo(armoredKey: string): Promise<{
   canCertify: boolean
   canAuthenticate: boolean
 }> {
-  const publicKey = await openpgp.readKey({ armoredKey })
+  const publicKey = await openpgp.readKey({ armoredKey, config: weakKeyConfig })
   const user = publicKey.users[0]
   const userID = user?.userID
 
@@ -77,7 +80,7 @@ export async function extractPrivateKeyInfo(
   canAuthenticate: boolean
   passphraseProtected: boolean
 }> {
-  let privateKey = await openpgp.readPrivateKey({ armoredKey })
+  let privateKey = await openpgp.readPrivateKey({ armoredKey, config: weakKeyConfig })
 
   // Check if passphrase protected
   const isEncrypted = privateKey.isDecrypted() === false
@@ -140,8 +143,8 @@ export async function verifyKeyPair(
   privateKeyArmored: string
 ): Promise<boolean> {
   try {
-    const publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored })
-    const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored })
+    const publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored, config: weakKeyConfig })
+    const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored, config: weakKeyConfig })
 
     const publicFingerprint = publicKey.getFingerprint()
     const privateFingerprint = privateKey.getFingerprint()
@@ -160,7 +163,7 @@ export async function validatePassphrase(
   passphrase: string
 ): Promise<boolean> {
   try {
-    const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored })
+    const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored, config: weakKeyConfig })
 
     if (!privateKey.isDecrypted()) {
       await openpgp.decryptKey({
