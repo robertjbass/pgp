@@ -26,19 +26,22 @@ interface EditorChoice {
   available: boolean
 }
 
-async function encryptMessage(message: string, publicKeyArmored?: string): Promise<string> {
-  let publicKey: openpgp.PublicKey
+async function encryptMessage(message: string, publicKeysArmored?: string | string[]): Promise<string> {
+  let publicKeys: openpgp.PublicKey[]
 
-  if (publicKeyArmored) {
-    // Use provided public key (someone else's key)
-    publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored, config: weakKeyConfig })
+  if (publicKeysArmored) {
+    // Use provided public key(s)
+    const keysArray = Array.isArray(publicKeysArmored) ? publicKeysArmored : [publicKeysArmored]
+    publicKeys = await Promise.all(
+      keysArray.map((key) => openpgp.readKey({ armoredKey: key, config: weakKeyConfig }))
+    )
   } else {
     // Use default keypair's public key (encrypt to self)
     const defaultKeypair = await keyManager.getDefaultKeypair()
     if (!defaultKeypair) {
       throw new Error('No default keypair found. Please set up a keypair first.')
     }
-    publicKey = await openpgp.readKey({ armoredKey: defaultKeypair.public_key, config: weakKeyConfig })
+    publicKeys = [await openpgp.readKey({ armoredKey: defaultKeypair.public_key, config: weakKeyConfig })]
 
     // Update last_used_at
     db.update('keypair', { key: 'id', value: defaultKeypair.id }, { last_used_at: new Date().toISOString() })
@@ -46,7 +49,7 @@ async function encryptMessage(message: string, publicKeyArmored?: string): Promi
 
   const encrypted = await openpgp.encrypt({
     message: await openpgp.createMessage({ text: message }),
-    encryptionKeys: publicKey,
+    encryptionKeys: publicKeys,
     config: weakKeyConfig,
   })
 
@@ -166,6 +169,208 @@ async function readInlineMultilineInput(promptText: string): Promise<string> {
       resolve(lines.join('\n'))
     })
   })
+}
+
+type Recipient = {
+  name: string
+  publicKey: string
+}
+
+function extractAllPublicKeys(content: string): string[] {
+  const keyRegex = /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/g
+  const matches = content.match(keyRegex)
+  return matches || []
+}
+
+async function addKeysFromClipboard(recipients: Recipient[]): Promise<number> {
+  let clipboardContent = ''
+  try {
+    clipboardContent = await clipboardy.read()
+  } catch {
+    console.log(chalk.yellow('Could not access clipboard'))
+    return 0
+  }
+
+  const keys = extractAllPublicKeys(clipboardContent)
+  if (keys.length === 0) {
+    console.log(chalk.yellow('No public keys found in clipboard'))
+    return 0
+  }
+
+  let addedCount = 0
+  for (const publicKey of keys) {
+    try {
+      // Validate the key
+      await openpgp.readKey({ armoredKey: publicKey, config: weakKeyConfig })
+      const keyInfo = await extractPublicKeyInfo(publicKey)
+      const recipientName = keyInfo.email || keyInfo.fingerprint?.slice(-8) || 'Unknown'
+
+      // Check for duplicates
+      const isDuplicate = recipients.some((r) => r.publicKey === publicKey)
+      if (isDuplicate) {
+        console.log(chalk.yellow(`⚠ Skipping duplicate key: ${recipientName}`))
+        continue
+      }
+
+      recipients.push({
+        name: recipientName,
+        publicKey,
+      })
+      console.log(chalk.green(`✓ Added recipient: ${recipientName}`))
+      addedCount++
+    } catch (error) {
+      console.log(chalk.red(`✗ Failed to parse a key: ${error instanceof Error ? error.message : 'unknown error'}`))
+    }
+  }
+
+  return addedCount
+}
+
+async function selectMultipleRecipients(): Promise<Recipient[]> {
+  const recipients: Recipient[] = []
+  const contacts = db.select({ table: 'contact' })
+  const defaultKeypair = await keyManager.getDefaultKeypair()
+
+  // Build the menu choices
+  function buildChoices() {
+    const choices: Array<{ name: string; value: string }> = []
+
+    // Show current recipients count
+    if (recipients.length > 0) {
+      choices.push({
+        name: chalk.cyan(`── Current recipients: ${recipients.length} ──`),
+        value: 'show-recipients',
+      })
+    }
+
+    // Option to add self (if not already added)
+    const selfAdded = recipients.some((r) => r.name === 'Myself')
+    if (defaultKeypair && !selfAdded) {
+      choices.push({
+        name: '🔑 Add myself (so I can also decrypt)',
+        value: 'self',
+      })
+    }
+
+    // Option to select from contacts
+    if (contacts.length > 0) {
+      choices.push({
+        name: `👥 Select from saved contacts (${contacts.length} available)`,
+        value: 'contacts',
+      })
+    }
+
+    // Clipboard and manual options
+    choices.push({
+      name: '📋 Paste from clipboard (supports multiple keys)',
+      value: 'clipboard',
+    })
+    choices.push({
+      name: '⌨️  Type/paste a single key',
+      value: 'manual',
+    })
+
+    // Done or cancel
+    choices.push({
+      name: recipients.length > 0 ? '✓ Done adding recipients' : '← Cancel',
+      value: 'done',
+    })
+
+    return choices
+  }
+
+  let addMore = true
+  while (addMore) {
+    const { addMethod } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'addMethod',
+        message: chalk.yellow('Add recipients:'),
+        choices: buildChoices(),
+      },
+    ])
+
+    if (addMethod === 'done') {
+      addMore = false
+    } else if (addMethod === 'show-recipients') {
+      // Show current recipients
+      console.log(chalk.cyan('\nCurrent recipients:'))
+      for (const r of recipients) {
+        console.log(chalk.gray(`   • ${r.name}`))
+      }
+      console.log()
+    } else if (addMethod === 'self') {
+      if (defaultKeypair) {
+        recipients.push({
+          name: 'Myself',
+          publicKey: defaultKeypair.public_key,
+        })
+        console.log(chalk.green('✓ Added yourself as a recipient'))
+      }
+    } else if (addMethod === 'contacts') {
+      // Show contacts as a checkbox
+      const { selectedContacts } = await inquirer.prompt([
+        {
+          type: 'checkbox',
+          name: 'selectedContacts',
+          message: chalk.yellow('Select contacts (space to toggle, enter to confirm):'),
+          choices: contacts.map((c) => {
+            const alreadyAdded = recipients.some((r) => r.publicKey === c.public_key)
+            return {
+              name: `${c.name} <${c.email || 'no email'}>${alreadyAdded ? chalk.gray(' (already added)') : ''}`,
+              value: c.id,
+              checked: false,
+              disabled: alreadyAdded,
+            }
+          }),
+        },
+      ])
+
+      let addedCount = 0
+      for (const contactId of selectedContacts) {
+        const contact = contacts.find((c) => c.id === contactId)
+        if (contact) {
+          recipients.push({
+            name: `${contact.name} <${contact.email || 'no email'}>`,
+            publicKey: contact.public_key,
+          })
+          addedCount++
+        }
+      }
+      if (addedCount > 0) {
+        console.log(chalk.green(`✓ Added ${addedCount} contact${addedCount > 1 ? 's' : ''}`))
+      }
+    } else if (addMethod === 'clipboard') {
+      const added = await addKeysFromClipboard(recipients)
+      if (added > 0) {
+        console.log(chalk.green(`\n✓ Added ${added} recipient${added > 1 ? 's' : ''} from clipboard\n`))
+      }
+    } else if (addMethod === 'manual') {
+      const publicKey = await getRecipientPublicKey()
+      if (publicKey) {
+        try {
+          const keyInfo = await extractPublicKeyInfo(publicKey)
+          const recipientName = keyInfo.email || keyInfo.fingerprint?.slice(-8) || 'Unknown'
+
+          // Check for duplicates
+          const isDuplicate = recipients.some((r) => r.publicKey === publicKey)
+          if (isDuplicate) {
+            console.log(chalk.yellow(`⚠ This recipient is already in the list`))
+          } else {
+            recipients.push({
+              name: recipientName,
+              publicKey,
+            })
+            console.log(chalk.green(`✓ Added recipient: ${recipientName}`))
+          }
+        } catch (error) {
+          console.log(chalk.red('Failed to parse public key'))
+        }
+      }
+    }
+  }
+
+  return recipients
 }
 
 async function getRecipientPublicKey(): Promise<string | null> {
@@ -324,6 +529,10 @@ async function main() {
               value: 'other',
             },
             {
+              name: '👥 Multiple recipients',
+              value: 'multiple',
+            },
+            {
               name: '← Back to main menu',
               value: 'back',
             },
@@ -337,11 +546,27 @@ async function main() {
 
       // Note: No 'main-menu' option here since 'back' already goes to main menu
 
-      let recipientPublicKey: string | undefined
+      let recipientPublicKeys: string[] = []
+      let recipientNames: string[] = []
       let isNewContact = false
 
-      // If encrypting for someone else, get their public key
-      if (recipient === 'other') {
+      // Handle multiple recipients
+      if (recipient === 'multiple') {
+        const recipients = await selectMultipleRecipients()
+        if (recipients.length === 0) {
+          console.log(chalk.red('\n❌ No recipients selected. Aborting.\n'))
+          return main()
+        }
+        recipientPublicKeys = recipients.map((r) => r.publicKey)
+        recipientNames = recipients.map((r) => r.name)
+
+        // Show summary
+        console.log(chalk.cyan('\n📬 Encrypting for the following recipients:'))
+        for (const name of recipientNames) {
+          console.log(chalk.gray(`   • ${name}`))
+        }
+        console.log()
+      } else if (recipient === 'other') {
         // Check if there are any saved contacts
         const contacts = db.select({ table: 'contact' })
 
@@ -381,13 +606,13 @@ async function main() {
               console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
               return main()
             }
-            recipientPublicKey = publicKey
+            recipientPublicKeys = [publicKey]
             isNewContact = true
           } else {
             // Use saved contact
             const selectedContact = contacts.find((c) => c.id === contactChoice)
             if (selectedContact) {
-              recipientPublicKey = selectedContact.public_key
+              recipientPublicKeys = [selectedContact.public_key]
             }
           }
         } else {
@@ -397,7 +622,7 @@ async function main() {
             console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
             return main()
           }
-          recipientPublicKey = publicKey
+          recipientPublicKeys = [publicKey]
           isNewContact = true
         }
       }
@@ -535,7 +760,7 @@ async function main() {
       }
 
       console.log(chalk.blue('\n⏳ Encrypting message...\n'))
-      const encrypted = await encryptMessage(message, recipientPublicKey)
+      const encrypted = await encryptMessage(message, recipientPublicKeys.length > 0 ? recipientPublicKeys : undefined)
 
       console.log(chalk.green.bold('✅ Encrypted Message:\n'))
       console.log(chalk.gray('─'.repeat(50)))
@@ -552,8 +777,9 @@ async function main() {
         )
       }
 
-      // Offer to save the contact if it's a new public key
-      if (isNewContact && recipientPublicKey) {
+      // Offer to save the contact if it's a new public key (single recipient only)
+      const newPublicKey = recipientPublicKeys[0]
+      if (isNewContact && newPublicKey !== undefined && recipientPublicKeys.length === 1) {
         const { saveContact } = await inquirer.prompt([
           {
             type: 'confirm',
@@ -566,7 +792,7 @@ async function main() {
         if (saveContact) {
           try {
             // Extract key information
-            const keyInfo = await extractPublicKeyInfo(recipientPublicKey)
+            const keyInfo = await extractPublicKeyInfo(newPublicKey)
 
             // Prompt for contact name
             const defaultName = (keyInfo.email || 'unknown').split('@')[0] || 'Contact'
@@ -595,7 +821,7 @@ async function main() {
                 name: contactName.trim(),
                 email: keyInfo.email,
                 fingerprint: keyInfo.fingerprint,
-                public_key: recipientPublicKey,
+                public_key: newPublicKey,
                 algorithm: keyInfo.algorithm,
                 key_size: keyInfo.keySize,
                 trusted: false,
