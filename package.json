@@ -6,10 +6,10 @@
   "type": "module",
   "packageManager": "pnpm@10.19.0",
   "scripts": {
-    "pgp": "pnpm --filter @pgp/cli dev",
+    "lpgp": "pnpm --filter lpgp dev",
     "serve": "vercel dev --listen 3000",
     "deploy:vercel": "vercel --prod",
-    "build": "pnpm --filter @pgp/cli build",
+    "build": "pnpm --filter lpgp build",
     "rebuild": "pnpm clean && pnpm install && pnpm build",
     "format": "prettier --write .",
     "clean": "rm -rf packages/*/dist packages/*/node_modules node_modules"
