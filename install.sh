@@ -28,9 +28,9 @@ print_error() {
 
 print_header() {
     echo ""
-    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}  🔐  Layerbase PGP Installer          ${BLUE}║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE} ════════════════════════════════════════${NC}"
+    echo -e "${BLUE} ${NC}   LPGP Installer           ${BLUE}${NC}"
+    echo -e "${BLUE} ════════════════════════════════════════${NC}"
     echo ""
 }
 
@@ -221,18 +221,8 @@ build_project() {
 setup_environment() {
     print_info "Setting up environment..."
 
-    if [ -f ".env" ]; then
-        print_warning ".env file already exists. Skipping creation."
-    else
-        if [ -f ".env.example" ]; then
-            print_info "Creating .env file from .env.example..."
-            cp .env.example .env
-            print_success ".env file created"
-            print_warning "⚠ IMPORTANT: Edit .env and add your PGP keys before running the tool"
-        else
-            print_warning ".env.example not found. You'll need to create .env manually"
-        fi
-    fi
+    # Database will be created automatically at ~/.lpgp/data.db on first run
+    print_success "Database will be initialized on first run at ~/.lpgp/data.db"
 }
 
 # Create shell alias
@@ -244,12 +234,12 @@ create_alias() {
         INSTALL_DIR=$(pwd)
 
         # Create alias command
-        ALIAS_CMD="alias lpgp='cd $INSTALL_DIR && pnpm pgp'"
+        ALIAS_CMD="alias lpgp='cd $INSTALL_DIR && pnpm dev'"
 
         # Add to shell config if not already there
         if ! grep -q "alias lpgp=" "$SHELL_CONFIG" 2>/dev/null; then
             echo "" >> "$SHELL_CONFIG"
-            echo "# Layerbase PGP Tool" >> "$SHELL_CONFIG"
+            echo "# LPGP Tool" >> "$SHELL_CONFIG"
             echo "$ALIAS_CMD" >> "$SHELL_CONFIG"
             print_success "Alias added to $SHELL_CONFIG"
             print_info "Run 'source $SHELL_CONFIG' or restart your terminal to use the 'lpgp' command"
@@ -322,10 +312,10 @@ main() {
 
     echo ""
     print_info "Next steps:"
-    echo "  1. Edit .env file and add your PGP keys"
-    echo "  2. Run: pnpm pgp"
+    echo "  1. Run: pnpm dev"
+    echo "  2. Use Key Management to generate or import your PGP keys"
     echo ""
-    print_success "Enjoy using Layerbase PGP! 🔐"
+    print_success "Enjoy using LPGP!"
     echo ""
 }
 

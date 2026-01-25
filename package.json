@@ -1,32 +1,56 @@
 {
-  "name": "layerbase-pgp",
-  "version": "1.0.0",
-  "description": "PGP encryption/decryption monorepo with CLI, API, and web frontend",
-  "private": true,
+  "name": "lpgp",
+  "version": "0.2.0",
+  "description": "Interactive CLI tool for PGP encryption/decryption with SQLite key management",
+  "author": "Bob Bass",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
-  "packageManager": "pnpm@10.19.0",
-  "scripts": {
-    "lpgp": "pnpm --filter lpgp dev",
-    "serve": "vercel dev --listen 3000",
-    "deploy:vercel": "vercel --prod",
-    "build": "pnpm --filter lpgp build",
-    "rebuild": "pnpm clean && pnpm install && pnpm build",
-    "format": "prettier --write .",
-    "clean": "rm -rf packages/*/dist packages/*/node_modules node_modules"
+  "bin": {
+    "lpgp": "./dist/pgp-tool.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertjbass/lpgp.git"
+  },
+  "homepage": "https://github.com/robertjbass/lpgp#readme",
+  "bugs": {
+    "url": "https://github.com/robertjbass/lpgp/issues"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "keywords": [
     "pgp",
+    "gpg",
     "encryption",
+    "decryption",
     "openpgp",
     "cli",
-    "security",
-    "privacy",
-    "monorepo"
+    "security"
   ],
-  "author": "Bob Bass",
-  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "dev": "tsx src/pgp-tool.ts",
+    "build": "tsc && cp src/schema.sql dist/schema.sql",
+    "start": "node dist/pgp-tool.js",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "chalk": "^5.6.2",
+    "clipboardy": "^5.0.0",
+    "cross-keychain": "^1.1.0",
+    "inquirer": "^12.10.0",
+    "openpgp": "^6.2.2"
+  },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/inquirer": "^9.0.9",
+    "@types/node": "^24.9.2",
     "prettier": "^3.6.2",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }
 }

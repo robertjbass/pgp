@@ -1,45 +1,29 @@
-# 🔐 Layerbase PGP
+# LPGP
 
-- [PGP Web Encrypt Client - (no JavaScript)](https://pgp-encrypt.vercel.app)- [PGP Web - PGP Web Encrypt Client - (with JavaScript) (TBD)
-- [CLI Tool](https://github.com/robertjbass/pgp)
+Interactive CLI tool for PGP encryption/decryption with SQLite key management.
 
-> **Note:** This is a personal side project created to learn more about encryption, PGP, and implementing secure web applications that work without JavaScript. It's a work in progress and should be used for educational purposes.
+> **Note:** This is a personal side project created to learn more about encryption and PGP. It's a work in progress and should be used for educational purposes.
 
-A monorepo containing a PGP encryption CLI tool and web interface. Built with Node.js, TypeScript, and Vercel serverless functions.
-
-## 📦 What's Inside
-
-This is a **pnpm workspace monorepo** with two packages:
-
-- **`@pgp/cli`** - Interactive CLI tool for PGP encryption/decryption with SQLite key management
-- **`@pgp/api`** - Web interface + serverless API deployed to Vercel (works without JavaScript)
-
-See [MONOREPO.md](MONOREPO.md) for detailed documentation.
-
-## ⚠️ Project Status
+## Project Status
 
 This project is **actively being developed** as a learning exercise. While functional, it may contain bugs or security considerations that need addressing. Use at your own discretion and avoid using it for highly sensitive production data.
 
-## ✨ Features
+## Features
 
-- 🔒 **PGP Encryption/Decryption** - Secure message encryption using OpenPGP
-- 📋 **Clipboard Integration** - Seamlessly encrypt/decrypt from clipboard
-- ✍️ **Multiple Input Methods**:
-  - Paste from clipboard
-  - Open in your preferred text editor
-  - Type inline directly in the terminal
-- 🎨 **Beautiful CLI Interface** - Colorful, intuitive prompts with emoji icons
-- 🖥️ **Cross-Platform Support** - Works on Linux, macOS, and Windows
-- 🛠️ **Smart Editor Detection** - Auto-detects available editors (VS Code, Vim, Nano, Notepad, etc.)
-- 👋 **Graceful Exit Handling** - Clean Ctrl+C interruption handling
+- **PGP Encryption/Decryption** - Secure message encryption using OpenPGP
+- **SQLite Key Management** - Store and manage multiple keypairs and contacts
+- **System Keychain Integration** - Passphrases stored securely in your OS keychain
+- **Clipboard Integration** - Seamlessly encrypt/decrypt from clipboard
+- **Multiple Input Methods** - Clipboard, text editor, or inline terminal input
+- **Cross-Platform Support** - Works on Linux, macOS, and Windows
+- **Smart Editor Detection** - Auto-detects available editors (VS Code, Vim, Nano, etc.)
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
 - Node.js (v18 or higher recommended)
 - pnpm (v10.19.0 or higher)
-- PGP key pair (public and private keys)
 
 ### Installation
 
@@ -48,8 +32,8 @@ This project is **actively being developed** as a learning exercise. While funct
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/layerbase-pgp.git
-cd layerbase-pgp
+git clone https://github.com/robertjbass/lpgp.git
+cd lpgp
 ```
 
 2. Run the installer:
@@ -65,22 +49,23 @@ The installer will:
 - Check for pnpm and install it if missing
 - Install all dependencies and compile native modules
 - Build the project
-- Create a `.env` file from the example
 - Optionally create an `lpgp` command alias
 
-3. Configure your PGP keys:
+3. Run the tool and create or import your keys:
 
-Edit the `.env` file and add your PGP keys (see `.env.example` for format).
+```bash
+pnpm dev
+```
 
-**Important:** Make sure there's a blank line after the `BEGIN` header in your PGP keys.
+Use the Key Management menu to generate new keypairs or import existing ones.
 
 #### Option 2: Manual Installation (For Developers)
 
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/layerbase-pgp.git
-cd layerbase-pgp
+git clone https://github.com/robertjass/lpgp.git
+cd lpgp
 ```
 
 2. Install dependencies:
@@ -89,44 +74,24 @@ cd layerbase-pgp
 pnpm install
 ```
 
-This will install all Node.js dependencies including `better-sqlite3`, which requires native compilation. The installation process automatically:
+This will install all Node.js dependencies including `better-sqlite3`, which requires native compilation.
 
-- Compiles the SQLite native module for your platform
-- Sets up the project dependencies
-- Prepares the development environment
-
-3. Set up your environment variables:
-
-Create a `.env` file in the root directory with your PGP keys:
-
-```bash
-cp .env.example .env
-```
-
-Then edit `.env` and add your PGP keys.
-
-**Important:** Make sure there's a blank line after the `BEGIN` header in your PGP keys.
-
-4. Build the project:
+3. Build the project:
 
 ```bash
 pnpm build
 ```
 
-5. Database initialization:
+4. Database initialization:
 
-The SQLite database is automatically created on first run. No manual setup required! When you first start the application, it will:
-
-- Create the `db/` directory
-- Initialize an empty SQLite database with all tables
-- Set up default settings
+The SQLite database is automatically created on first run at `~/.lpgp/data.db`. No manual setup required!
 
 ### Usage
 
 Run the PGP tool:
 
 ```bash
-pnpm pgp
+pnpm dev
 ```
 
 You'll be greeted with an interactive menu:
@@ -142,7 +107,7 @@ You'll be greeted with an interactive menu:
   👋 Exit
 ```
 
-## 🎯 How It Works
+## How It Works
 
 ### Encrypting a Message
 
@@ -159,16 +124,13 @@ You'll be greeted with an interactive menu:
 2. Choose your input method for the encrypted text
 3. The decrypted message is displayed and automatically copied to your clipboard
 
-## 🛠️ Development
+## Development
 
 ### Available Scripts
 
 ```bash
-# Run the PGP tool
-pnpm pgp
-
-# Start the development server (placeholder)
-pnpm serve
+# Run the PGP tool (development)
+pnpm dev
 
 # Format code with Prettier
 pnpm format
@@ -183,48 +145,45 @@ pnpm start
 ### Project Structure
 
 ```
-layerbase-pgp/
+lpgp/
 ├── src/
-│   ├── index.ts          # Placeholder server
-│   ├── pgp-tool.ts       # Main PGP CLI tool
+│   ├── pgp-tool.ts       # Main CLI entry point
+│   ├── encrypt.ts        # Encryption logic
+│   ├── decrypt.ts        # Decryption logic
+│   ├── key-manager.ts    # Key management UI
+│   ├── key-utils.ts      # Key utility functions
 │   ├── db.ts             # SQLite database layer
-│   └── schema.sql        # Database schema definition
-├── db/                   # SQLite database (auto-created, not in git)
-│   └── data.db           # User data and PGP keys
-├── .env                  # Environment variables (not in git)
+│   ├── ui.ts             # Centralized UI styling
+│   └── schema.sql        # Database schema
+├── dist/                 # Built output (not in git)
 ├── package.json
 ├── tsconfig.json
-├── TODO.md               # Project roadmap
 └── README.md
 ```
 
-## 📋 Roadmap
+## Roadmap
 
-See [TODO.md](TODO.md) for the complete project roadmap. Upcoming features include:
+See [TODO.md](TODO.md) for the complete project roadmap. Completed and upcoming features:
 
-- ✅ SQLite database integration (completed)
-- Configuration file support (replacing .env)
-- Web UI with Express backend
-- **Standalone landing page with progressive enhancement**
-  - Real-time encryption with JavaScript enabled
-  - Server-side encryption fallback when JavaScript is disabled
-  - Learn how to build accessible, secure web apps that work without client-side JavaScript
-- PGP key detection from system
+- SQLite database integration
+- System keychain passphrase storage
 - Key generation and management
-- File encryption/decryption
-- Multi-recipient support
+- Multi-recipient encryption
+- Contact management
+- File encryption/decryption (planned)
+- GPG keyring import (planned)
 
-## 🔒 Security Considerations
+## Security Considerations
 
 As this is a learning project, please note:
 
-- Store your `.env` file securely and never commit it to version control
-- The `.gitignore` already excludes `.env` files
-- Consider the security implications of storing private keys in environment variables
-- For production use, consider more secure key storage methods (e.g., hardware tokens, key management systems)
+- Passphrases are stored in your system keychain (macOS Keychain, Windows Credential Manager, etc.)
+- Keys are stored in SQLite database at `~/.lpgp/data.db`
+- The `.gitignore` excludes database and `.env` files
 - This tool has not undergone professional security audit
+- For production use, consider more secure key storage methods (e.g., hardware tokens)
 
-## 🤝 Contributing
+## Contributing
 
 This is primarily a personal learning project, but suggestions and feedback are welcome! Feel free to:
 
@@ -232,7 +191,7 @@ This is primarily a personal learning project, but suggestions and feedback are 
 - Submit pull requests with improvements
 - Share your experience using the tool
 
-## 📝 License
+## License
 
 **Source Available Educational License** - NOT Open Source
 
@@ -240,7 +199,7 @@ This software is source-available for educational purposes, security auditing, a
 
 The source code is publicly available to promote transparency, enable security audits, and support learning about encryption and web development - but this does not make it open source software.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Built with [OpenPGP.js](https://openpgpjs.org/) for encryption
 - [Inquirer.js](https://github.com/SBoudrias/Inquirer.js) for beautiful CLI prompts
@@ -254,8 +213,6 @@ The source code is publicly available to promote transparency, enable security a
 - PGP encryption and cryptography fundamentals
 - Node.js CLI development with TypeScript
 - Security best practices for handling sensitive data
-- **Progressive enhancement and building web applications that work without JavaScript**
-- Server-side vs. client-side encryption trade-offs
-- Accessible web design principles
+- System keychain integration for secure credential storage
 
-It's a work in progress and will continue to evolve as I learn more about encryption, secure communication, and building resilient web applications.
+It's a work in progress and will continue to evolve as I learn more about encryption and secure communication.

@@ -1,8 +1,24 @@
 {
-  // Root tsconfig for monorepo - references all packages
-  "files": [],
-  "references": [
-    { "path": "./packages/cli" },
-    { "path": "./packages/api" }
-  ]
+  "compilerOptions": {
+    "module": "nodenext",
+    "target": "esnext",
+    "types": ["node"],
+
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+
+    "strict": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"]
 }
