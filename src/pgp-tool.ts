@@ -44,9 +44,9 @@ const weakKeyConfig = {
   rejectCurves: new Set(),
 }
 
-// Initialize database and key manager
-const db = new Db()
-const keyManager = new KeyManager(db)
+// Database and key manager (initialized in main())
+let db: Db
+let keyManager: KeyManager
 
 // Session passphrase cache - stores passphrases by keypair ID
 const passphraseCache = new Map<number, string>()
@@ -557,6 +557,12 @@ function clearPassphraseCache() {
 }
 
 async function main() {
+  // Initialize database on first run
+  if (!db) {
+    db = await Db.init()
+    keyManager = new KeyManager(db)
+  }
+
   printBanner()
 
   // Check for default keypair on first run
