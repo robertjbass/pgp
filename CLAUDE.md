@@ -37,23 +37,25 @@ pnpm format
 ```
 lpgp/
 ├── src/
-│   ├── pgp-tool.ts    # Main CLI entry point
-│   ├── encrypt.ts     # Encryption logic
-│   ├── decrypt.ts     # Decryption logic
-│   ├── key-manager.ts # Key management UI
-│   ├── key-utils.ts   # Key utility functions
-│   ├── db.ts          # SQLite database layer
-│   ├── ui.ts          # Centralized UI styling
-│   └── schema.sql     # Database schema
-├── dist/              # Built output
+│   ├── pgp-tool.ts      # Main CLI entry point (interactive + CLI routing)
+│   ├── cli-commands.ts  # Non-interactive CLI command handlers
+│   ├── encrypt.ts       # Encryption logic
+│   ├── decrypt.ts       # Decryption logic
+│   ├── key-manager.ts   # Key management UI
+│   ├── key-utils.ts     # Key utility functions
+│   ├── db.ts            # SQLite database layer
+│   ├── ui.ts            # Centralized UI styling
+│   └── schema.sql       # Database schema
+├── dist/                # Built output
 ├── package.json
 ├── tsconfig.json
-└── install.sh         # Automated installer
+└── install.sh           # Automated installer
 ```
 
 ### Core Components
 
-- **pgp-tool.ts** - Main CLI application with interactive menus
+- **pgp-tool.ts** - Main CLI entry point; routes to interactive mode or CLI commands
+- **cli-commands.ts** - Non-interactive CLI commands (generate, encrypt, decrypt, etc.)
 - **encrypt.ts** - Encryption using OpenPGP.js with recipient selection
 - **decrypt.ts** - Decryption with automatic key detection
 - **key-manager.ts** - Key management (generate, import, export, contacts)
@@ -66,13 +68,26 @@ lpgp/
 - **Database:** `~/.lpgp/data.db` - SQLite database for keys and contacts
 - **Passphrases:** System keychain via `cross-keychain` (secure storage)
 
-### Input Methods
+### Input Methods (Interactive Mode)
 
-The CLI supports three input methods for encrypt/decrypt:
+The interactive CLI supports three input methods for encrypt/decrypt:
 
 1. **Clipboard** - Uses `clipboardy` to read from system clipboard
 2. **Editor** - Dynamically detects available editors (VS Code, Vim, Nano, etc.)
 3. **Inline** - Node.js `readline` for multiline terminal input (Ctrl+D to finish)
+
+### CLI Commands (Non-Interactive)
+
+Running with arguments invokes non-interactive mode via commander.js:
+
+```bash
+lpgp generate --name "Name" --email "email" --passphrase "secret"
+lpgp export-public [--fingerprint <fp>] [--json]
+lpgp list-keys [--json]
+lpgp encrypt "message" --to <fingerprint|email>
+lpgp decrypt "message" [--passphrase <pass>]
+lpgp              # No args = interactive mode
+```
 
 ## Code Style & Patterns
 

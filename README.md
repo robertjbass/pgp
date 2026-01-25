@@ -17,6 +17,7 @@ This project is **actively being developed** as a learning exercise. While funct
 - **Multiple Input Methods** - Clipboard, text editor, or inline terminal input
 - **Cross-Platform Support** - Works on Linux, macOS, and Windows
 - **Smart Editor Detection** - Auto-detects available editors (VS Code, Vim, Nano, etc.)
+- **Scriptable CLI** - Non-interactive commands for CI/CD and scripting
 
 ## Getting Started
 
@@ -74,8 +75,6 @@ cd lpgp
 pnpm install
 ```
 
-This will install all Node.js dependencies including `better-sqlite3`, which requires native compilation.
-
 3. Build the project:
 
 ```bash
@@ -88,7 +87,13 @@ The SQLite database is automatically created on first run at `~/.lpgp/data.db`. 
 
 ### Usage
 
-Run the PGP tool:
+#### Quick Start with npx
+
+```bash
+npx lpgp
+```
+
+#### Run from Source
 
 ```bash
 pnpm dev
@@ -124,6 +129,43 @@ You'll be greeted with an interactive menu:
 2. Choose your input method for the encrypted text
 3. The decrypted message is displayed and automatically copied to your clipboard
 
+### CLI Commands (Non-Interactive)
+
+For scripting and CI/CD, lpgp supports non-interactive commands:
+
+```bash
+# Generate a new keypair
+lpgp generate --name "Your Name" --email "you@example.com" --passphrase "secret"
+lpgp generate --name "Your Name" --email "you@example.com" --no-passphrase
+
+# List all keypairs
+lpgp list-keys
+lpgp list-keys --json
+
+# Export public key
+lpgp export-public
+lpgp export-public --fingerprint ABC123 --json
+
+# Encrypt a message
+lpgp encrypt "Hello World" --to user@example.com
+lpgp encrypt --file message.txt --to ABC123 --output encrypted.pgp
+echo "Hello" | lpgp encrypt --to user@example.com
+
+# Decrypt a message
+lpgp decrypt "-----BEGIN PGP MESSAGE-----..."
+lpgp decrypt --file encrypted.pgp --passphrase "secret"
+cat encrypted.pgp | lpgp decrypt
+
+# Help
+lpgp --help
+lpgp encrypt --help
+```
+
+**Passphrase sources for decryption:**
+1. `--passphrase` command line option
+2. `LPGP_PASSPHRASE` environment variable
+3. System keychain (if previously stored)
+
 ## Development
 
 ### Available Scripts
@@ -148,6 +190,7 @@ pnpm start
 lpgp/
 ├── src/
 │   ├── pgp-tool.ts       # Main CLI entry point
+│   ├── cli-commands.ts   # Non-interactive CLI command handlers
 │   ├── encrypt.ts        # Encryption logic
 │   ├── decrypt.ts        # Decryption logic
 │   ├── key-manager.ts    # Key management UI
