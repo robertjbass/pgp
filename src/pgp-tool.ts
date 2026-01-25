@@ -51,6 +51,44 @@ let keyManager: KeyManager
 // Session passphrase cache - stores passphrases by keypair ID
 const passphraseCache = new Map<number, string>()
 
+// Check if lpgp is installed globally (not running via npx/pnpx)
+function isInstalledGlobally(): boolean {
+  try {
+    const result = execSync('which lpgp 2>/dev/null || where lpgp 2>nul', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    return result.trim().length > 0
+  } catch {
+    return false
+  }
+}
+
+// Install lpgp globally
+async function installGlobally(): Promise<boolean> {
+  console.clear()
+  printBanner()
+  console.log()
+  showLoading('Installing lpgp globally...')
+  console.log()
+  console.log(colors.muted('Running: npm install -g lpgp'))
+  console.log()
+
+  try {
+    execSync('npm install -g lpgp', { stdio: 'inherit' })
+    console.log()
+    showSuccess('lpgp installed globally! You can now run it with just "lpgp"')
+    console.log()
+    return true
+  } catch {
+    console.log()
+    showError('Failed to install globally. You may need to run with sudo:')
+    console.log(colors.muted('  sudo npm install -g lpgp'))
+    console.log()
+    return false
+  }
+}
+
 interface EditorChoice {
   name: string
   command: string
@@ -577,18 +615,32 @@ async function main() {
     console.log()
   }
 
+  // Build menu choices
+  const menuChoices: any[] = [
+    { name: `${icons.encrypt} Encrypt a message`, value: 'encrypt' },
+    { name: `${icons.decrypt} Decrypt a message`, value: 'decrypt' },
+    { name: `${icons.key} Manage keys`, value: 'keys' },
+  ]
+
+  // Add install option if running via npx/pnpx
+  const isGlobal = isInstalledGlobally()
+  if (!isGlobal) {
+    menuChoices.push(new inquirer.Separator())
+    menuChoices.push({
+      name: `${icons.add} Install lpgp globally ${colors.muted('(for offline use)')}`,
+      value: 'install',
+    })
+  }
+
+  menuChoices.push(new inquirer.Separator())
+  menuChoices.push(exitChoice())
+
   const { action } = await escapeablePrompt([
     {
       type: 'list',
       name: 'action',
       message: promptMessage('What would you like to do?'),
-      choices: [
-        { name: `${icons.encrypt} Encrypt a message`, value: 'encrypt' },
-        { name: `${icons.decrypt} Decrypt a message`, value: 'decrypt' },
-        { name: `${icons.key} Manage keys`, value: 'keys' },
-        new inquirer.Separator(),
-        exitChoice(),
-      ],
+      choices: menuChoices,
     },
   ])
 
@@ -596,6 +648,18 @@ async function main() {
     clearPassphraseCache()
     console.clear()
     process.exit(0)
+  }
+
+  if (action === 'install') {
+    await installGlobally()
+    await escapeablePrompt([
+      {
+        type: 'input',
+        name: 'continue',
+        message: promptMessage('Press Enter to continue...'),
+      },
+    ])
+    return main()
   }
 
   if (action === 'keys') {
