@@ -469,9 +469,19 @@ export async function decryptCommand(
       console.log(decrypted)
       process.exit(EXIT_SUCCESS)
     } catch (error) {
-      console.error(
-        'Error: Decryption failed. Message may not be encrypted to your key.'
-      )
+      const errorMessage =
+        error instanceof Error ? error.message : String(error)
+
+      if (errorMessage.includes('No decryption key packets found')) {
+        console.error(
+          'Error: Decryption failed. This message was not encrypted for your current default key.'
+        )
+        console.error(
+          '  Tip: Use `lpgp list-keys` to check which keypair is set as default.'
+        )
+      } else {
+        console.error(`Error: Decryption failed. ${errorMessage}`)
+      }
       process.exit(EXIT_DECRYPT_FAILED)
     }
   } catch (error) {

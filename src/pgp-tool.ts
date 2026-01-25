@@ -423,14 +423,23 @@ function startInteractiveMode(): void {
       }
     }
 
-    const privateKey = await openpgp.decryptKey({
-      privateKey: await openpgp.readPrivateKey({
+    // Only decrypt the key if it's passphrase-protected
+    let privateKey: openpgp.PrivateKey
+    if (defaultKeypair.passphrase_protected) {
+      privateKey = await openpgp.decryptKey({
+        privateKey: await openpgp.readPrivateKey({
+          armoredKey: defaultKeypair.private_key,
+          config: weakKeyConfig,
+        }),
+        passphrase,
+        config: weakKeyConfig,
+      })
+    } else {
+      privateKey = await openpgp.readPrivateKey({
         armoredKey: defaultKeypair.private_key,
         config: weakKeyConfig,
-      }),
-      passphrase,
-      config: weakKeyConfig,
-    })
+      })
+    }
 
     const message = await openpgp.readMessage({
       armoredMessage: encryptedMessage,
@@ -1541,9 +1550,24 @@ function startInteractiveMode(): void {
         // Re-throw escape errors to be handled by the main loop
         if (error instanceof EscapeError) throw error
         console.log()
-        showError(
-          `Decryption failed: ${error instanceof Error ? error.message : error}`
-        )
+
+        const errorMessage =
+          error instanceof Error ? error.message : String(error)
+
+        // Provide more helpful error messages for common issues
+        if (errorMessage.includes('No decryption key packets found')) {
+          showError(
+            'Decryption failed: This message was not encrypted for your current default key.'
+          )
+          console.log()
+          console.log(
+            colors.muted(
+              '  Tip: Check Key Management to verify the correct keypair is set as default.'
+            )
+          )
+        } else {
+          showError(`Decryption failed: ${errorMessage}`)
+        }
       }
     }
 
