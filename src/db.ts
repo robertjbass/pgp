@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3'
-import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs'
+import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from 'sql.js'
+import { readFileSync, existsSync, mkdirSync, writeFileSync, copyFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { getConfigDir, getDbPath } from './config.js'
@@ -85,33 +85,82 @@ function intToBool(value: number): boolean {
   return value === 1
 }
 
-export class Db {
-  private db: Database.Database
+// Singleton instance
+let dbInstance: Db | null = null
 
-  constructor() {
-    // Ensure config directory exists (handled by getConfigDir, but be explicit)
+export class Db {
+  private db: SqlJsDatabase
+
+  private constructor(db: SqlJsDatabase) {
+    this.db = db
+  }
+
+  /**
+   * Initialize and get the database instance
+   */
+  static async init(): Promise<Db> {
+    if (dbInstance) {
+      return dbInstance
+    }
+
+    // Ensure config directory exists
     if (!existsSync(DB_DIR)) {
       mkdirSync(DB_DIR, { recursive: true })
     }
 
     // Migrate from legacy location if needed
-    this.migrateFromLegacyLocation()
+    Db.migrateFromLegacyLocation()
 
-    // Initialize database
-    this.db = new Database(DB_PATH)
-    this.db.pragma('journal_mode = WAL') // Better performance for concurrent reads
+    // Initialize sql.js
+    const SQL = await initSqlJs()
+
+    // Load existing database or create new one
+    let db: SqlJsDatabase
+    if (existsSync(DB_PATH)) {
+      const buffer = readFileSync(DB_PATH)
+      db = new SQL.Database(buffer)
+    } else {
+      db = new SQL.Database()
+    }
+
+    const instance = new Db(db)
 
     // Initialize schema
-    this.initializeSchema()
+    instance.initializeSchema()
 
-    // Migrate old JSON data if it exists (from legacy location)
-    this.migrateFromJson()
+    // Migrate old JSON data if it exists
+    instance.migrateFromJson()
+
+    // Save initial state
+    instance.save()
+
+    dbInstance = instance
+    return instance
+  }
+
+  /**
+   * Get the singleton instance (must call init() first)
+   */
+  static getInstance(): Db {
+    if (!dbInstance) {
+      throw new Error('Database not initialized. Call Db.init() first.')
+    }
+    return dbInstance
+  }
+
+  /**
+   * Save database to disk
+   */
+  private save(): void {
+    const data = this.db.export()
+    const buffer = Buffer.from(data)
+    writeFileSync(DB_PATH, buffer)
   }
 
   /**
    * Migrate database from the old project-local location to ~/.lpgp
    */
-  private migrateFromLegacyLocation(): void {
+  private static migrateFromLegacyLocation(): void {
     // If new db already exists, nothing to migrate
     if (existsSync(DB_PATH)) {
       return
@@ -122,17 +171,6 @@ export class Db {
       try {
         // Copy the old database to the new location
         copyFileSync(LEGACY_DB_PATH, DB_PATH)
-
-        // Also copy WAL and SHM files if they exist
-        const walPath = LEGACY_DB_PATH + '-wal'
-        const shmPath = LEGACY_DB_PATH + '-shm'
-        if (existsSync(walPath)) {
-          copyFileSync(walPath, DB_PATH + '-wal')
-        }
-        if (existsSync(shmPath)) {
-          copyFileSync(shmPath, DB_PATH + '-shm')
-        }
-
         console.log(`Migrated database from ${LEGACY_DB_PATH} to ${DB_PATH}`)
       } catch (error) {
         console.error('Failed to migrate database from legacy location:', error)
@@ -142,7 +180,7 @@ export class Db {
 
   private initializeSchema(): void {
     const schema = readFileSync(SCHEMA_PATH, 'utf-8')
-    this.db.exec(schema)
+    this.db.run(schema)
   }
 
   private migrateFromJson(): void {
@@ -192,77 +230,104 @@ export class Db {
 
       // Migrate keypairs (with default values for new fields)
       for (const kp of oldData.keypair) {
-        const existing = this.db
-          .prepare('SELECT id FROM keypair WHERE fingerprint = ?')
-          .get(kp.fingerprint)
-        if (!existing) {
-          this.db
-            .prepare(
-              `INSERT INTO keypair (
+        const existing = this.db.exec(
+          `SELECT id FROM keypair WHERE fingerprint = '${kp.fingerprint.replace(/'/g, "''")}'`
+        )
+        if (existing.length === 0 || existing[0]?.values.length === 0) {
+          this.db.run(
+            `INSERT INTO keypair (
               name, email, fingerprint, public_key, private_key, passphrase_protected,
               algorithm, key_size, can_sign, can_encrypt, can_certify, can_authenticate,
               expires_at, revoked, revocation_reason, created_at, updated_at, last_used_at, is_default
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            )
-            .run(
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
               kp.name,
               kp.email,
               kp.fingerprint,
               kp.public_key,
               kp.private_key,
               boolToInt(kp.passphrase_protected),
-              'RSA', // Default algorithm
-              '4096', // Default key size
-              1, // can_sign
-              1, // can_encrypt
-              0, // can_certify
-              0, // can_authenticate
-              null, // expires_at
-              0, // revoked
-              null, // revocation_reason
+              'RSA',
+              '4096',
+              1,
+              1,
+              0,
+              0,
+              null,
+              0,
+              null,
               kp.created_at,
               kp.updated_at,
-              null, // last_used_at
-              boolToInt(kp.is_default)
-            )
+              null,
+              boolToInt(kp.is_default),
+            ]
+          )
         }
       }
 
       // Migrate contacts (with default values for new fields)
       for (const contact of oldData.contact) {
-        const existing = this.db
-          .prepare('SELECT id FROM contact WHERE fingerprint = ?')
-          .get(contact.fingerprint)
-        if (!existing) {
-          this.db
-            .prepare(
-              `INSERT INTO contact (
+        const existing = this.db.exec(
+          `SELECT id FROM contact WHERE fingerprint = '${contact.fingerprint.replace(/'/g, "''")}'`
+        )
+        if (existing.length === 0 || existing[0]?.values.length === 0) {
+          this.db.run(
+            `INSERT INTO contact (
               name, email, fingerprint, public_key, algorithm, key_size,
               trusted, last_verified_at, notes, expires_at, revoked, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            )
-            .run(
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
               contact.name,
               contact.email,
               contact.fingerprint,
               contact.public_key,
-              'RSA', // Default algorithm
-              '4096', // Default key size
+              'RSA',
+              '4096',
               boolToInt(contact.trusted),
-              null, // last_verified_at
+              null,
               contact.notes || null,
-              null, // expires_at
-              0, // revoked
+              null,
+              0,
               contact.created_at,
-              contact.updated_at
-            )
+              contact.updated_at,
+            ]
+          )
         }
       }
 
+      this.save()
       console.log('Successfully migrated data from JSON to SQLite')
     } catch (error) {
       console.error('Failed to migrate JSON data:', error)
     }
+  }
+
+  private queryAll(sql: string, params: SqlValue[] = []): Record<string, unknown>[] {
+    const stmt = this.db.prepare(sql)
+    if (params.length > 0) {
+      stmt.bind(params)
+    }
+
+    const results: Record<string, unknown>[] = []
+    while (stmt.step()) {
+      const row = stmt.getAsObject()
+      results.push(row as Record<string, unknown>)
+    }
+    stmt.free()
+    return results
+  }
+
+  private queryOne(sql: string, params: SqlValue[] = []): Record<string, unknown> | undefined {
+    const results = this.queryAll(sql, params)
+    return results[0]
+  }
+
+  private runSql(sql: string, params: SqlValue[] = []): { lastInsertRowid: number } {
+    this.db.run(sql, params)
+    const result = this.db.exec('SELECT last_insert_rowid() as id')
+    const lastId = result[0]?.values[0]?.[0] as number
+    this.save()
+    return { lastInsertRowid: lastId }
   }
 
   public select<T extends keyof Schema>({
@@ -277,24 +342,24 @@ export class Db {
           : keyof Keypair | keyof Contact
         : never
       compare: 'is' | 'is not' | 'like' | 'not like'
-      value: any
+      value: unknown
     }
   }): T extends 'settings' ? Settings : Schema[T] {
     if (table === 'settings') {
-      const row = this.db.prepare('SELECT * FROM settings WHERE id = 1').get() as any
+      const row = this.queryOne('SELECT * FROM settings WHERE id = 1')
       if (!row) {
         throw new Error('Settings not found')
       }
       // Convert SQLite integers to booleans
       return {
         ...row,
-        auto_sign_messages: intToBool(row.auto_sign_messages),
-        prefer_inline_pgp: intToBool(row.prefer_inline_pgp),
-      } as any
+        auto_sign_messages: intToBool(row.auto_sign_messages as number),
+        prefer_inline_pgp: intToBool(row.prefer_inline_pgp as number),
+      } as T extends 'settings' ? Settings : Schema[T]
     }
 
     let sql = `SELECT * FROM ${table}`
-    let params: any[] = []
+    const params: SqlValue[] = []
 
     if (where) {
       const operator =
@@ -308,36 +373,36 @@ export class Db {
 
       sql += ` WHERE ${String(where.key)} ${operator} ?`
       params.push(
-        where.compare === 'like' || where.compare === 'not like'
+        (where.compare === 'like' || where.compare === 'not like'
           ? `%${where.value}%`
-          : where.value
+          : where.value) as SqlValue
       )
     }
 
-    const rows = this.db.prepare(sql).all(...params) as any[]
+    const rows = this.queryAll(sql, params)
 
     // Convert SQLite integers to booleans for keypair and contact
     return rows.map((row) => {
       if (table === 'keypair') {
         return {
           ...row,
-          passphrase_protected: intToBool(row.passphrase_protected),
-          can_sign: intToBool(row.can_sign),
-          can_encrypt: intToBool(row.can_encrypt),
-          can_certify: intToBool(row.can_certify),
-          can_authenticate: intToBool(row.can_authenticate),
-          revoked: intToBool(row.revoked),
-          is_default: intToBool(row.is_default),
+          passphrase_protected: intToBool(row.passphrase_protected as number),
+          can_sign: intToBool(row.can_sign as number),
+          can_encrypt: intToBool(row.can_encrypt as number),
+          can_certify: intToBool(row.can_certify as number),
+          can_authenticate: intToBool(row.can_authenticate as number),
+          revoked: intToBool(row.revoked as number),
+          is_default: intToBool(row.is_default as number),
         }
       } else if (table === 'contact') {
         return {
           ...row,
-          trusted: intToBool(row.trusted),
-          revoked: intToBool(row.revoked),
+          trusted: intToBool(row.trusted as number),
+          revoked: intToBool(row.revoked as number),
         }
       }
       return row
-    }) as any
+    }) as T extends 'settings' ? Settings : Schema[T]
   }
 
   public insert<T extends keyof Schema>(
@@ -352,7 +417,7 @@ export class Db {
       // Settings is a single row, use UPDATE instead
       const updates = value as Partial<Omit<Settings, 'id'>>
       const setPairs: string[] = []
-      const params: any[] = []
+      const params: SqlValue[] = []
 
       for (const [key, val] of Object.entries(updates)) {
         setPairs.push(`${key} = ?`)
@@ -363,46 +428,49 @@ export class Db {
         }
       }
 
-      this.db.prepare(`UPDATE settings SET ${setPairs.join(', ')} WHERE id = 1`).run(...params)
+      this.runSql(`UPDATE settings SET ${setPairs.join(', ')} WHERE id = 1`, params)
 
-      return this.select({ table: 'settings' }) as any
+      return this.select({ table: 'settings' }) as T extends 'settings'
+        ? Settings
+        : T extends 'keypair'
+          ? Keypair
+          : Contact
     }
 
     const now = new Date().toISOString()
-    const record = { ...value, created_at: now, updated_at: now } as any
+    const record = { ...value, created_at: now, updated_at: now } as Record<string, unknown>
 
     // Convert booleans to integers for SQLite
     if (table === 'keypair') {
-      record.passphrase_protected = boolToInt(record.passphrase_protected)
-      record.can_sign = boolToInt(record.can_sign ?? true)
-      record.can_encrypt = boolToInt(record.can_encrypt ?? true)
-      record.can_certify = boolToInt(record.can_certify ?? false)
-      record.can_authenticate = boolToInt(record.can_authenticate ?? false)
-      record.revoked = boolToInt(record.revoked ?? false)
-      record.is_default = boolToInt(record.is_default ?? false)
+      record.passphrase_protected = boolToInt(record.passphrase_protected as boolean)
+      record.can_sign = boolToInt((record.can_sign as boolean | undefined) ?? true)
+      record.can_encrypt = boolToInt((record.can_encrypt as boolean | undefined) ?? true)
+      record.can_certify = boolToInt((record.can_certify as boolean | undefined) ?? false)
+      record.can_authenticate = boolToInt((record.can_authenticate as boolean | undefined) ?? false)
+      record.revoked = boolToInt((record.revoked as boolean | undefined) ?? false)
+      record.is_default = boolToInt((record.is_default as boolean | undefined) ?? false)
     } else if (table === 'contact') {
-      record.trusted = boolToInt(record.trusted ?? false)
-      record.revoked = boolToInt(record.revoked ?? false)
+      record.trusted = boolToInt((record.trusted as boolean | undefined) ?? false)
+      record.revoked = boolToInt((record.revoked as boolean | undefined) ?? false)
     }
 
     const keys = Object.keys(record)
     const placeholders = keys.map(() => '?').join(', ')
-    const values = keys.map((k) => record[k])
+    const values = keys.map((k) => record[k]) as SqlValue[]
 
     const sql = `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`
-    const info = this.db.prepare(sql).run(...values)
+    const info = this.runSql(sql, values)
 
     // Fetch and return the inserted record
-    return this.db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid) as any
+    const inserted = this.queryOne(`SELECT * FROM ${table} WHERE id = ?`, [info.lastInsertRowid])
+    return inserted as T extends 'settings' ? Settings : T extends 'keypair' ? Keypair : Contact
   }
 
   public update<T extends keyof Schema>(
     table: T,
     where: {
-      key: T extends 'settings'
-        ? keyof Settings
-        : keyof Keypair | keyof Contact
-      value: any
+      key: T extends 'settings' ? keyof Settings : keyof Keypair | keyof Contact
+      value: unknown
     },
     updates: T extends 'settings'
       ? Partial<Settings>
@@ -411,51 +479,49 @@ export class Db {
         : Partial<Contact>
   ): void {
     const now = new Date().toISOString()
-    const record = { ...updates, updated_at: now } as any
+    const record = { ...updates, updated_at: now } as Record<string, unknown>
 
     // Convert booleans to integers for SQLite
-    if (table === 'keypair' && record) {
+    if (table === 'keypair') {
       if ('passphrase_protected' in record)
-        record.passphrase_protected = boolToInt(record.passphrase_protected)
-      if ('can_sign' in record) record.can_sign = boolToInt(record.can_sign)
-      if ('can_encrypt' in record) record.can_encrypt = boolToInt(record.can_encrypt)
-      if ('can_certify' in record) record.can_certify = boolToInt(record.can_certify)
+        record.passphrase_protected = boolToInt(record.passphrase_protected as boolean)
+      if ('can_sign' in record) record.can_sign = boolToInt(record.can_sign as boolean)
+      if ('can_encrypt' in record) record.can_encrypt = boolToInt(record.can_encrypt as boolean)
+      if ('can_certify' in record) record.can_certify = boolToInt(record.can_certify as boolean)
       if ('can_authenticate' in record)
-        record.can_authenticate = boolToInt(record.can_authenticate)
-      if ('revoked' in record) record.revoked = boolToInt(record.revoked)
-      if ('is_default' in record) record.is_default = boolToInt(record.is_default)
-    } else if (table === 'contact' && record) {
-      if ('trusted' in record) record.trusted = boolToInt(record.trusted)
-      if ('revoked' in record) record.revoked = boolToInt(record.revoked)
-    } else if (table === 'settings' && record) {
+        record.can_authenticate = boolToInt(record.can_authenticate as boolean)
+      if ('revoked' in record) record.revoked = boolToInt(record.revoked as boolean)
+      if ('is_default' in record) record.is_default = boolToInt(record.is_default as boolean)
+    } else if (table === 'contact') {
+      if ('trusted' in record) record.trusted = boolToInt(record.trusted as boolean)
+      if ('revoked' in record) record.revoked = boolToInt(record.revoked as boolean)
+    } else if (table === 'settings') {
       if ('auto_sign_messages' in record)
-        record.auto_sign_messages = boolToInt(record.auto_sign_messages)
+        record.auto_sign_messages = boolToInt(record.auto_sign_messages as boolean)
       if ('prefer_inline_pgp' in record)
-        record.prefer_inline_pgp = boolToInt(record.prefer_inline_pgp)
+        record.prefer_inline_pgp = boolToInt(record.prefer_inline_pgp as boolean)
     }
 
     const setPairs: string[] = []
-    const params: any[] = []
+    const params: SqlValue[] = []
 
     for (const [key, val] of Object.entries(record)) {
       if (key === 'id') continue // Don't update id
       setPairs.push(`${key} = ?`)
-      params.push(val)
+      params.push(val as SqlValue)
     }
 
-    params.push(where.value)
+    params.push(where.value as SqlValue)
 
     const sql = `UPDATE ${table} SET ${setPairs.join(', ')} WHERE ${String(where.key)} = ?`
-    this.db.prepare(sql).run(...params)
+    this.runSql(sql, params)
   }
 
   public delete<T extends keyof Schema>(
     table: T,
     where: {
-      key: T extends 'settings'
-        ? keyof Settings
-        : keyof Keypair | keyof Contact
-      value: any
+      key: T extends 'settings' ? keyof Settings : keyof Keypair | keyof Contact
+      value: unknown
     }
   ): void {
     if (table === 'settings') {
@@ -463,10 +529,12 @@ export class Db {
     }
 
     const sql = `DELETE FROM ${table} WHERE ${String(where.key)} = ?`
-    this.db.prepare(sql).run(where.value)
+    this.runSql(sql, [where.value as SqlValue])
   }
 
   public close(): void {
+    this.save()
     this.db.close()
+    dbInstance = null
   }
 }
