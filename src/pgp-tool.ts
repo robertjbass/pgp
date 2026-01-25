@@ -51,45 +51,100 @@ let keyManager: KeyManager
 // Session passphrase cache - stores passphrases by keypair ID
 const passphraseCache = new Map<number, string>()
 
-// Check if lpgp is installed globally (not running via npx/pnpx)
-function isInstalledGlobally(): boolean {
+// Get installed version of lpgp (null if not installed)
+function getInstalledVersion(): string | null {
   try {
-    const result = execSync('which lpgp 2>/dev/null || where lpgp 2>nul', {
+    // Check if lpgp is in PATH
+    execSync('which lpgp 2>/dev/null || where lpgp 2>nul', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     })
-    return result.trim().length > 0
+    // Get the installed version
+    const version = execSync('npm list -g lpgp --json 2>/dev/null', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const parsed = JSON.parse(version)
+    return parsed.dependencies?.lpgp?.version || null
   } catch {
-    return false
+    return null
   }
 }
 
-// Install lpgp globally
-async function installGlobally(): Promise<boolean> {
+// Get latest version from npm registry
+function getLatestVersion(): string | null {
+  try {
+    const result = execSync('npm view lpgp version 2>/dev/null', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    return result.trim()
+  } catch {
+    return null
+  }
+}
+
+// Detect which package manager to use
+function detectPackageManager(): 'pnpm' | 'yarn' | 'npm' {
+  try {
+    execSync('which pnpm 2>/dev/null || where pnpm 2>nul', { stdio: ['pipe', 'pipe', 'pipe'] })
+    return 'pnpm'
+  } catch {
+    try {
+      execSync('which yarn 2>/dev/null || where yarn 2>nul', { stdio: ['pipe', 'pipe', 'pipe'] })
+      return 'yarn'
+    } catch {
+      return 'npm'
+    }
+  }
+}
+
+// Compare semver versions (returns true if v1 < v2)
+function isOlderVersion(v1: string, v2: string): boolean {
+  const p1 = v1.split('.').map(Number)
+  const p2 = v2.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    if ((p1[i] || 0) < (p2[i] || 0)) return true
+    if ((p1[i] || 0) > (p2[i] || 0)) return false
+  }
+  return false
+}
+
+// Install or update lpgp globally
+async function installOrUpdateGlobally(isUpdate: boolean): Promise<boolean> {
   console.clear()
   printBanner()
   console.log()
-  showLoading('Installing lpgp globally...')
+
+  const pm = detectPackageManager()
+  const action = isUpdate ? 'Updating' : 'Installing'
+  const cmd = pm === 'yarn' ? `yarn global add lpgp` : `${pm} install -g lpgp`
+
+  showLoading(`${action} lpgp globally...`)
   console.log()
-  console.log(colors.muted('Running: npm install -g lpgp'))
+  console.log(colors.muted(`Running: ${cmd}`))
   console.log()
 
   try {
-    execSync('npm install -g lpgp', { stdio: 'inherit' })
+    execSync(cmd, { stdio: 'inherit' })
     console.log()
-    showSuccess('lpgp installed globally! You can now run it with just "lpgp"')
+    if (isUpdate) {
+      showSuccess('lpgp updated successfully!')
+    } else {
+      showSuccess('lpgp installed globally! You can now run it with just "lpgp"')
+    }
     console.log()
     return true
   } catch {
     console.log()
-    showError('Failed to install globally. You may need to run with sudo:')
-    console.log(colors.muted('  sudo npm install -g lpgp'))
+    showError(`Failed to ${isUpdate ? 'update' : 'install'}. You may need to run with sudo:`)
+    console.log(colors.muted(`  sudo ${cmd}`))
     console.log()
     return false
   }
 }
 
-interface EditorChoice {
+type EditorChoice = {
   name: string
   command: string
   available: boolean
@@ -622,13 +677,23 @@ async function main() {
     { name: `${icons.key} Manage keys`, value: 'keys' },
   ]
 
-  // Add install option if running via npx/pnpx
-  const isGlobal = isInstalledGlobally()
-  if (!isGlobal) {
+  // Check if installed globally and if update is available
+  const installedVersion = getInstalledVersion()
+  const latestVersion = getLatestVersion()
+
+  if (!installedVersion) {
+    // Not installed globally - offer to install
     menuChoices.push(new inquirer.Separator())
     menuChoices.push({
       name: `${icons.add} Install lpgp globally ${colors.muted('(for offline use)')}`,
       value: 'install',
+    })
+  } else if (latestVersion && isOlderVersion(installedVersion, latestVersion)) {
+    // Installed but outdated - offer to update
+    menuChoices.push(new inquirer.Separator())
+    menuChoices.push({
+      name: `${icons.add} Update lpgp ${colors.muted(`(${installedVersion} → ${latestVersion})`)}`,
+      value: 'update',
     })
   }
 
@@ -650,8 +715,8 @@ async function main() {
     process.exit(0)
   }
 
-  if (action === 'install') {
-    await installGlobally()
+  if (action === 'install' || action === 'update') {
+    await installOrUpdateGlobally(action === 'update')
     await escapeablePrompt([
       {
         type: 'input',
