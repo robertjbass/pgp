@@ -1,14 +1,23 @@
 import Database from 'better-sqlite3'
-import { readFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { getConfigDir, getDbPath } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-const DB_DIR = join(__dirname, '..', 'db')
-const DB_PATH = join(DB_DIR, 'data.db')
+
+// New location: ~/.lpgp/data.db
+const DB_DIR = getConfigDir()
+const DB_PATH = getDbPath()
+
+// Schema is bundled with the package
 const SCHEMA_PATH = join(__dirname, 'schema.sql')
-const OLD_JSON_PATH = join(DB_DIR, 'data.json')
+
+// Legacy locations (for migration)
+const LEGACY_DB_DIR = join(__dirname, '..', 'db')
+const LEGACY_DB_PATH = join(LEGACY_DB_DIR, 'data.db')
+const LEGACY_JSON_PATH = join(LEGACY_DB_DIR, 'data.json')
 
 // Your own keypairs (you have both public and private keys)
 export type Keypair = {
@@ -80,10 +89,13 @@ export class Db {
   private db: Database.Database
 
   constructor() {
-    // Ensure db directory exists
+    // Ensure config directory exists (handled by getConfigDir, but be explicit)
     if (!existsSync(DB_DIR)) {
       mkdirSync(DB_DIR, { recursive: true })
     }
+
+    // Migrate from legacy location if needed
+    this.migrateFromLegacyLocation()
 
     // Initialize database
     this.db = new Database(DB_PATH)
@@ -92,8 +104,40 @@ export class Db {
     // Initialize schema
     this.initializeSchema()
 
-    // Migrate old JSON data if it exists
+    // Migrate old JSON data if it exists (from legacy location)
     this.migrateFromJson()
+  }
+
+  /**
+   * Migrate database from the old project-local location to ~/.lpgp
+   */
+  private migrateFromLegacyLocation(): void {
+    // If new db already exists, nothing to migrate
+    if (existsSync(DB_PATH)) {
+      return
+    }
+
+    // Check if there's a database in the legacy location
+    if (existsSync(LEGACY_DB_PATH)) {
+      try {
+        // Copy the old database to the new location
+        copyFileSync(LEGACY_DB_PATH, DB_PATH)
+
+        // Also copy WAL and SHM files if they exist
+        const walPath = LEGACY_DB_PATH + '-wal'
+        const shmPath = LEGACY_DB_PATH + '-shm'
+        if (existsSync(walPath)) {
+          copyFileSync(walPath, DB_PATH + '-wal')
+        }
+        if (existsSync(shmPath)) {
+          copyFileSync(shmPath, DB_PATH + '-shm')
+        }
+
+        console.log(`Migrated database from ${LEGACY_DB_PATH} to ${DB_PATH}`)
+      } catch (error) {
+        console.error('Failed to migrate database from legacy location:', error)
+      }
+    }
   }
 
   private initializeSchema(): void {
@@ -102,12 +146,12 @@ export class Db {
   }
 
   private migrateFromJson(): void {
-    if (!existsSync(OLD_JSON_PATH)) {
+    if (!existsSync(LEGACY_JSON_PATH)) {
       return
     }
 
     try {
-      const fileContent = readFileSync(OLD_JSON_PATH, 'utf-8').trim()
+      const fileContent = readFileSync(LEGACY_JSON_PATH, 'utf-8').trim()
       if (fileContent === '') {
         return
       }

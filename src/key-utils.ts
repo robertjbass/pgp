@@ -2,10 +2,56 @@ import * as openpgp from 'openpgp'
 import type { Keypair } from './db.js'
 
 /**
+ * Obfuscate an email address for privacy
+ * Example: "kevinlong@protonmail.com" -> "ke******ng@p*********.com"
+ */
+export function obfuscateEmail(email: string): string {
+  if (!email || !email.includes('@')) return email
+
+  const [localPart, domain] = email.split('@')
+  if (!localPart || !domain) return email
+
+  // Obfuscate local part: show first 2 and last 2 chars
+  let obfuscatedLocal: string
+  if (localPart.length <= 4) {
+    obfuscatedLocal = localPart[0] + '*'.repeat(localPart.length - 1)
+  } else {
+    const showChars = 2
+    obfuscatedLocal =
+      localPart.slice(0, showChars) +
+      '*'.repeat(localPart.length - showChars * 2) +
+      localPart.slice(-showChars)
+  }
+
+  // Obfuscate domain: show first char, obfuscate until TLD
+  const lastDot = domain.lastIndexOf('.')
+  if (lastDot === -1) {
+    return `${obfuscatedLocal}@${domain}`
+  }
+
+  const domainName = domain.slice(0, lastDot)
+  const tld = domain.slice(lastDot)
+
+  let obfuscatedDomain: string
+  if (domainName.length <= 2) {
+    obfuscatedDomain = domainName[0] + '*'.repeat(domainName.length - 1)
+  } else {
+    obfuscatedDomain = domainName[0] + '*'.repeat(domainName.length - 1)
+  }
+
+  return `${obfuscatedLocal}@${obfuscatedDomain}${tld}`
+}
+
+/**
  * Extract key information from a PGP public key
  */
 // Config to allow weak keys like DSA (not recommended for production)
-const weakKeyConfig = { rejectPublicKeyAlgorithms: new Set() }
+const weakKeyConfig = {
+  rejectPublicKeyAlgorithms: new Set(),
+  rejectHashAlgorithms: new Set(),
+  rejectMessageHashAlgorithms: new Set(),
+  rejectCurves: new Set(),
+}
 
 export async function extractPublicKeyInfo(armoredKey: string): Promise<{
   fingerprint: string
@@ -30,19 +76,19 @@ export async function extractPublicKeyInfo(armoredKey: string): Promise<{
 
   // Get key capabilities
   try {
-    await publicKey.verifyPrimaryKey()
+    await publicKey.verifyPrimaryKey(undefined, undefined, weakKeyConfig)
     // If verification doesn't throw, the key is valid
   } catch (e) {
     // Key verification failed
   }
   const canSign = true // Assume true for generated keys
-  const canEncrypt = publicKey.getEncryptionKey() !== null
+  const canEncrypt = (await publicKey.getEncryptionKey(undefined, undefined, undefined, weakKeyConfig)) !== null
   const canCertify = true // Primary keys can typically certify
   const canAuthenticate = false // Not common for primary keys
 
   // Get expiration
   let expiresAt: string | null = null
-  const expirationTime = await publicKey.getExpirationTime()
+  const expirationTime = await publicKey.getExpirationTime(undefined, weakKeyConfig)
   if (expirationTime && expirationTime !== Infinity) {
     expiresAt = new Date(expirationTime).toISOString()
   }
@@ -90,6 +136,7 @@ export async function extractPrivateKeyInfo(
     privateKey = await openpgp.decryptKey({
       privateKey,
       passphrase,
+      config: weakKeyConfig,
     })
   }
 
@@ -103,19 +150,19 @@ export async function extractPrivateKeyInfo(
 
   // Get key capabilities
   try {
-    await privateKey.verifyPrimaryKey()
+    await privateKey.verifyPrimaryKey(undefined, undefined, weakKeyConfig)
     // If verification doesn't throw, the key is valid
   } catch (e) {
     // Key verification failed
   }
   const canSign = true // Assume true for generated keys
-  const canEncrypt = privateKey.getEncryptionKey() !== null
+  const canEncrypt = (await privateKey.getEncryptionKey(undefined, undefined, undefined, weakKeyConfig)) !== null
   const canCertify = true
   const canAuthenticate = false
 
   // Get expiration
   let expiresAt: string | null = null
-  const expirationTime = await privateKey.getExpirationTime()
+  const expirationTime = await privateKey.getExpirationTime(undefined, weakKeyConfig)
   if (expirationTime && expirationTime !== Infinity) {
     expiresAt = new Date(expirationTime).toISOString()
   }
@@ -169,6 +216,7 @@ export async function validatePassphrase(
       await openpgp.decryptKey({
         privateKey,
         passphrase,
+        config: weakKeyConfig,
       })
     }
 
@@ -184,7 +232,7 @@ export async function validatePassphrase(
 export function formatKeypairInfo(keypair: Keypair): string {
   const lines = [
     `Name: ${keypair.name}`,
-    `Email: ${keypair.email}`,
+    `Email: ${obfuscateEmail(keypair.email)}`,
     `Fingerprint: ${keypair.fingerprint}`,
     `Algorithm: ${keypair.algorithm} (${keypair.key_size})`,
     keypair.expires_at ? `Expires: ${new Date(keypair.expires_at).toLocaleDateString()}` : 'Expires: Never',
@@ -196,7 +244,7 @@ export function formatKeypairInfo(keypair: Keypair): string {
     ]
       .filter(Boolean)
       .join(', ')}`,
-    keypair.revoked ? '⚠️  REVOKED' : '',
+    keypair.revoked ? '! REVOKED' : '',
     keypair.is_default ? '✓ Default keypair' : '',
   ]
 
