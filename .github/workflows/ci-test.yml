@@ -1,0 +1,127 @@
+name: CI Test
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test CLI - Generate keypair
+        id: generate
+        run: |
+          FINGERPRINT=$(node dist/pgp-tool.js generate --name "CI Test" --email "ci@test.com" --no-passphrase)
+          echo "fingerprint=$FINGERPRINT" >> $GITHUB_OUTPUT
+          echo "Generated keypair: $FINGERPRINT"
+
+      - name: Test CLI - List keys
+        run: |
+          node dist/pgp-tool.js list-keys
+          node dist/pgp-tool.js list-keys --json
+
+      - name: Test CLI - Export public key
+        run: |
+          node dist/pgp-tool.js export-public
+          node dist/pgp-tool.js export-public --json
+
+      - name: Test CLI - Encrypt and decrypt roundtrip
+        run: |
+          FINGERPRINT="${{ steps.generate.outputs.fingerprint }}"
+
+          # Test with inline message argument
+          ENCRYPTED=$(node dist/pgp-tool.js encrypt "Hello World" --to "$FINGERPRINT")
+          DECRYPTED=$(echo "$ENCRYPTED" | node dist/pgp-tool.js decrypt)
+
+          if [ "$DECRYPTED" = "Hello World" ]; then
+            echo "Test PASSED: Inline message encrypt/decrypt"
+          else
+            echo "Test FAILED: expected 'Hello World', got '$DECRYPTED'"
+            exit 1
+          fi
+
+      - name: Test CLI - Encrypt and decrypt via stdin
+        run: |
+          FINGERPRINT="${{ steps.generate.outputs.fingerprint }}"
+
+          # Test with piped stdin
+          DECRYPTED=$(echo "Hello from stdin" | node dist/pgp-tool.js encrypt --to "$FINGERPRINT" | node dist/pgp-tool.js decrypt)
+
+          if [ "$DECRYPTED" = "Hello from stdin" ]; then
+            echo "Test PASSED: Stdin pipe encrypt/decrypt"
+          else
+            echo "Test FAILED: expected 'Hello from stdin', got '$DECRYPTED'"
+            exit 1
+          fi
+
+      - name: Test CLI - Encrypt and decrypt via file
+        run: |
+          FINGERPRINT="${{ steps.generate.outputs.fingerprint }}"
+
+          # Test with file input/output
+          echo "Hello from file" > /tmp/test_message.txt
+          node dist/pgp-tool.js encrypt --file /tmp/test_message.txt --to "$FINGERPRINT" --output /tmp/encrypted.pgp
+          DECRYPTED=$(node dist/pgp-tool.js decrypt --file /tmp/encrypted.pgp)
+
+          if [ "$DECRYPTED" = "Hello from file" ]; then
+            echo "Test PASSED: File encrypt/decrypt"
+          else
+            echo "Test FAILED: expected 'Hello from file', got '$DECRYPTED'"
+            exit 1
+          fi
+
+          rm /tmp/test_message.txt /tmp/encrypted.pgp
+
+      - name: Test CLI - Encrypt to email
+        run: |
+          # Test resolving recipient by email
+          DECRYPTED=$(echo "Hello by email" | node dist/pgp-tool.js encrypt --to "ci@test.com" | node dist/pgp-tool.js decrypt)
+
+          if [ "$DECRYPTED" = "Hello by email" ]; then
+            echo "Test PASSED: Encrypt to email"
+          else
+            echo "Test FAILED: expected 'Hello by email', got '$DECRYPTED'"
+            exit 1
+          fi
+
+      - name: Test CLI - Help commands
+        run: |
+          node dist/pgp-tool.js --help
+          node dist/pgp-tool.js generate --help
+          node dist/pgp-tool.js encrypt --help
+          node dist/pgp-tool.js decrypt --help
+
+      - name: Test CLI - Version
+        run: |
+          VERSION=$(node dist/pgp-tool.js --version)
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+
+          if [ "$VERSION" = "$PACKAGE_VERSION" ]; then
+            echo "Test PASSED: Version matches package.json ($VERSION)"
+          else
+            echo "Test FAILED: CLI version '$VERSION' != package.json version '$PACKAGE_VERSION'"
+            exit 1
+          fi
+
+      - name: All tests passed
+        run: echo "All CLI tests passed successfully!"

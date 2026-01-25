@@ -95,16 +95,22 @@ const BANNER_WIDTH = 42
 
 export function printBanner(): void {
   console.clear()
-  const title = APP_NAME.padStart((BANNER_WIDTH + APP_NAME.length) / 2).padEnd(BANNER_WIDTH)
+  const title = APP_NAME.padStart((BANNER_WIDTH + APP_NAME.length) / 2).padEnd(
+    BANNER_WIDTH
+  )
   console.log()
   console.log(colors.primaryBold('╔' + '═'.repeat(BANNER_WIDTH) + '╗'))
-  console.log(colors.primaryBold('║') + colors.primary(title) + colors.primaryBold('║'))
+  console.log(
+    colors.primaryBold('║') + colors.primary(title) + colors.primaryBold('║')
+  )
   console.log(colors.primaryBold('╚' + '═'.repeat(BANNER_WIDTH) + '╝'))
   console.log()
 }
 
 export function printSectionHeader(title: string): void {
-  const padded = ` ${title} `.padStart((BANNER_WIDTH + title.length + 2) / 2).padEnd(BANNER_WIDTH)
+  const padded = ` ${title} `
+    .padStart((BANNER_WIDTH + title.length + 2) / 2)
+    .padEnd(BANNER_WIDTH)
   console.log()
   console.log(colors.infoBold('┌' + '─'.repeat(BANNER_WIDTH) + '┐'))
   console.log(colors.infoBold('│') + colors.info(padded) + colors.infoBold('│'))
@@ -161,7 +167,10 @@ export function menuChoice(
 /**
  * Standard navigation choices for menus
  */
-export function backChoice(label: string = 'Back'): { name: string; value: string } {
+export function backChoice(label: string = 'Back'): {
+  name: string
+  value: string
+} {
   return { name: `${icons.back} ${label}`, value: 'back' }
 }
 
@@ -197,7 +206,10 @@ export function showContentBox(title: string, content: string): void {
 /**
  * Display a key-value pair
  */
-export function showKeyValue(key: string, value: string | number | boolean | null): void {
+export function showKeyValue(
+  key: string,
+  value: string | number | boolean | null
+): void {
   const displayValue = value === null ? colors.muted('(none)') : String(value)
   console.log(`${colors.muted(key + ':')} ${displayValue}`)
 }

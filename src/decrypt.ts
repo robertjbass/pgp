@@ -14,7 +14,10 @@ export async function decryptMessage(
   passphrase: string
 ): Promise<string> {
   const privateKey = await openpgp.decryptKey({
-    privateKey: await openpgp.readPrivateKey({ armoredKey: privateKeyArmored, config: weakKeyConfig }),
+    privateKey: await openpgp.readPrivateKey({
+      armoredKey: privateKeyArmored,
+      config: weakKeyConfig,
+    }),
     passphrase,
     config: weakKeyConfig,
   })

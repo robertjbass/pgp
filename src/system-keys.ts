@@ -27,17 +27,24 @@ export function isGpgInstalled(): boolean {
 /**
  * List all GPG keys from the system keyring
  */
-export function listGpgKeys(): { publicKeys: SystemKey[]; secretKeys: SystemKey[] } {
+export function listGpgKeys(): {
+  publicKeys: SystemKey[]
+  secretKeys: SystemKey[]
+} {
   const publicKeys: SystemKey[] = []
   const secretKeys: SystemKey[] = []
 
   try {
     // List public keys
-    const publicOutput = execSync('gpg --list-keys --with-colons', { encoding: 'utf-8' })
+    const publicOutput = execSync('gpg --list-keys --with-colons', {
+      encoding: 'utf-8',
+    })
     publicKeys.push(...parseGpgOutput(publicOutput, 'public'))
 
     // List secret keys
-    const secretOutput = execSync('gpg --list-secret-keys --with-colons', { encoding: 'utf-8' })
+    const secretOutput = execSync('gpg --list-secret-keys --with-colons', {
+      encoding: 'utf-8',
+    })
     secretKeys.push(...parseGpgOutput(secretOutput, 'secret'))
   } catch (error) {
     // GPG might not be installed or have no keys
@@ -49,7 +56,10 @@ export function listGpgKeys(): { publicKeys: SystemKey[]; secretKeys: SystemKey[
 /**
  * Parse GPG --list-keys output
  */
-function parseGpgOutput(output: string, type: 'public' | 'secret'): SystemKey[] {
+function parseGpgOutput(
+  output: string,
+  type: 'public' | 'secret'
+): SystemKey[] {
   const keys: SystemKey[] = []
   const lines = output.split('\n')
 
@@ -108,7 +118,9 @@ function parseGpgOutput(output: string, type: 'public' | 'secret'): SystemKey[] 
  */
 export function exportGpgPublicKey(keyId: string): string | null {
   try {
-    const output = execSync(`gpg --armor --export ${keyId}`, { encoding: 'utf-8' })
+    const output = execSync(`gpg --armor --export ${keyId}`, {
+      encoding: 'utf-8',
+    })
     return output.trim()
   } catch (error) {
     return null
@@ -120,7 +132,9 @@ export function exportGpgPublicKey(keyId: string): string | null {
  */
 export function exportGpgSecretKey(keyId: string): string | null {
   try {
-    const output = execSync(`gpg --armor --export-secret-keys ${keyId}`, { encoding: 'utf-8' })
+    const output = execSync(`gpg --armor --export-secret-keys ${keyId}`, {
+      encoding: 'utf-8',
+    })
     return output.trim()
   } catch (error) {
     return null

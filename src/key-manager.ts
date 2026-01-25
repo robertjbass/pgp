@@ -19,10 +19,7 @@ import {
   type SystemKey,
 } from './system-keys.js'
 import { escapeablePrompt } from './prompts.js'
-import {
-  hasStoredPassphrase,
-  deleteStoredPassphrase,
-} from './keychain.js'
+import { hasStoredPassphrase, deleteStoredPassphrase } from './keychain.js'
 import {
   colors,
   icons,
@@ -76,7 +73,9 @@ export class KeyManager {
   async setupFirstKeypair(): Promise<void> {
     printSectionHeader('First Time Setup')
 
-    showWarning('No PGP keypair found. You need to set up a keypair to use this tool.')
+    showWarning(
+      'No PGP keypair found. You need to set up a keypair to use this tool.'
+    )
     console.log()
 
     // Check if GPG is available to offer system import
@@ -86,7 +85,10 @@ export class KeyManager {
     ]
 
     if (gpgAvailable) {
-      choices.push({ name: `${icons.gpg} Import from system GPG`, value: 'import-gpg' })
+      choices.push({
+        name: `${icons.gpg} Import from system GPG`,
+        value: 'import-gpg',
+      })
     }
 
     choices.push(
@@ -132,8 +134,12 @@ export class KeyManager {
     try {
       const clipboardy = (await import('clipboardy')).default
       clipboardContent = await clipboardy.read()
-      hasPublicInClipboard = clipboardContent.includes('BEGIN PGP PUBLIC KEY BLOCK')
-      hasPrivateInClipboard = clipboardContent.includes('BEGIN PGP PRIVATE KEY BLOCK')
+      hasPublicInClipboard = clipboardContent.includes(
+        'BEGIN PGP PUBLIC KEY BLOCK'
+      )
+      hasPrivateInClipboard = clipboardContent.includes(
+        'BEGIN PGP PRIVATE KEY BLOCK'
+      )
     } catch (e) {
       // Clipboard not available, continue without it
     }
@@ -145,7 +151,8 @@ export class KeyManager {
         name: 'name',
         message: promptMessage('Keypair name (e.g., "Personal", "Work"):'),
         default: 'Personal',
-        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
@@ -160,15 +167,20 @@ export class KeyManager {
         {
           type: 'confirm',
           name: 'useClipboard',
-          message: 'Both public and private keys detected in clipboard. Use them?',
+          message:
+            'Both public and private keys detected in clipboard. Use them?',
           default: true,
         },
       ])
 
       if (useClipboard) {
         // Extract both keys from clipboard
-        const publicMatch = clipboardContent.match(/-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/)
-        const privateMatch = clipboardContent.match(/-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----/)
+        const publicMatch = clipboardContent.match(
+          /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/
+        )
+        const privateMatch = clipboardContent.match(
+          /-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----/
+        )
 
         if (publicMatch) {
           publicKey = publicMatch[0]
@@ -193,7 +205,9 @@ export class KeyManager {
       ])
 
       if (useClipboard) {
-        const publicMatch = clipboardContent.match(/-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/)
+        const publicMatch = clipboardContent.match(
+          /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/
+        )
         if (publicMatch) {
           publicKey = publicMatch[0]
         }
@@ -202,7 +216,9 @@ export class KeyManager {
 
     if (!publicKey) {
       console.log(promptMessage('\nPaste your PGP PUBLIC key:'))
-      console.log(colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)'))
+      console.log(
+        colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)')
+      )
       publicKey = await this.readKeyInput()
     }
 
@@ -226,7 +242,9 @@ export class KeyManager {
       ])
 
       if (useClipboard) {
-        const privateMatch = clipboardContent.match(/-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----/)
+        const privateMatch = clipboardContent.match(
+          /-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----/
+        )
         if (privateMatch) {
           privateKey = privateMatch[0]
         }
@@ -235,7 +253,9 @@ export class KeyManager {
 
     if (!privateKey) {
       console.log(promptMessage('\nPaste your PGP PRIVATE key:'))
-      console.log(colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)'))
+      console.log(
+        colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)')
+      )
       privateKey = await this.readKeyInput()
     }
 
@@ -264,14 +284,19 @@ export class KeyManager {
       {
         type: 'password',
         name: 'passphrase',
-        message: promptMessage('Enter passphrase for private key (leave empty if none):'),
+        message: promptMessage(
+          'Enter passphrase for private key (leave empty if none):'
+        ),
         mask: '*',
       },
     ])
 
     // Extract key information
     try {
-      const keyInfo = await extractPrivateKeyInfo(privateKey, passphrase || undefined)
+      const keyInfo = await extractPrivateKeyInfo(
+        privateKey,
+        passphrase || undefined
+      )
 
       console.log()
       showSuccess('Keypair verified!')
@@ -280,7 +305,10 @@ export class KeyManager {
       showKeyValue('  Email', keyInfo.email)
       showKeyValue('  Fingerprint', keyInfo.fingerprint)
       showKeyValue('  Algorithm', `${keyInfo.algorithm} (${keyInfo.keySize})`)
-      showKeyValue('  Passphrase Protected', keyInfo.passphraseProtected ? 'Yes' : 'No')
+      showKeyValue(
+        '  Passphrase Protected',
+        keyInfo.passphraseProtected ? 'Yes' : 'No'
+      )
       console.log()
 
       // Check if default should be set
@@ -304,7 +332,11 @@ export class KeyManager {
           where: { key: 'is_default', compare: 'is', value: 1 },
         })
         for (const kp of currentDefaults) {
-          this.db.update('keypair', { key: 'id', value: kp.id }, { is_default: false })
+          this.db.update(
+            'keypair',
+            { key: 'id', value: kp.id },
+            { is_default: false }
+          )
         }
       }
 
@@ -351,7 +383,8 @@ export class KeyManager {
         type: 'input',
         name: 'name',
         message: promptMessage('Your name:'),
-        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
@@ -373,7 +406,8 @@ export class KeyManager {
         name: 'keypairName',
         message: promptMessage('Keypair name (e.g., "Personal", "Work"):'),
         default: 'Personal',
-        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
@@ -381,9 +415,12 @@ export class KeyManager {
       {
         type: 'password',
         name: 'passphrase',
-        message: promptMessage('Enter a passphrase to protect your private key:'),
+        message: promptMessage(
+          'Enter a passphrase to protect your private key:'
+        ),
         mask: '*',
-        validate: (input: string) => input.length >= 8 || 'Passphrase must be at least 8 characters',
+        validate: (input: string) =>
+          input.length >= 8 || 'Passphrase must be at least 8 characters',
       },
     ])
 
@@ -393,7 +430,8 @@ export class KeyManager {
         name: 'passphraseConfirm',
         message: promptMessage('Confirm passphrase:'),
         mask: '*',
-        validate: (input: string) => input === passphrase || 'Passphrases do not match',
+        validate: (input: string) =>
+          input === passphrase || 'Passphrases do not match',
       },
     ])
 
@@ -440,7 +478,11 @@ export class KeyManager {
       if (setAsDefault) {
         const allKeypairs = this.db.select({ table: 'keypair' })
         for (const kp of allKeypairs) {
-          this.db.update('keypair', { key: 'id', value: kp.id }, { is_default: false })
+          this.db.update(
+            'keypair',
+            { key: 'id', value: kp.id },
+            { is_default: false }
+          )
         }
       }
 
@@ -453,12 +495,17 @@ export class KeyManager {
       showKeyValue('Name', keypairName)
       showKeyValue('Email', publicKeyInfo.email)
       showKeyValue('Fingerprint', publicKeyInfo.fingerprint)
-      showKeyValue('Algorithm', `${publicKeyInfo.algorithm} (${publicKeyInfo.keySize} bits)`)
+      showKeyValue(
+        'Algorithm',
+        `${publicKeyInfo.algorithm} (${publicKeyInfo.keySize} bits)`
+      )
       printDivider()
       console.log()
     } catch (error) {
       console.log()
-      showError(`Failed to generate keypair: ${error instanceof Error ? error.message : error}`)
+      showError(
+        `Failed to generate keypair: ${error instanceof Error ? error.message : error}`
+      )
     }
   }
 
@@ -471,7 +518,9 @@ export class KeyManager {
     // Check if GPG is installed
     if (!isGpgInstalled()) {
       showWarning('GPG is not installed on this system.')
-      console.log(colors.muted('Install GPG to import keys from your system keyring.'))
+      console.log(
+        colors.muted('Install GPG to import keys from your system keyring.')
+      )
       console.log()
       return
     }
@@ -518,7 +567,11 @@ export class KeyManager {
       },
     ])
 
-    if (selectedIndex === -1 || selectedIndex === 'cancel' || selectedIndex === 'main-menu') {
+    if (
+      selectedIndex === -1 ||
+      selectedIndex === 'cancel' ||
+      selectedIndex === 'main-menu'
+    ) {
       return
     }
 
@@ -550,7 +603,8 @@ export class KeyManager {
         name: 'name',
         message: promptMessage('Keypair name:'),
         default: selectedKey.name || 'Imported from GPG',
-        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
@@ -559,14 +613,19 @@ export class KeyManager {
       {
         type: 'password',
         name: 'passphrase',
-        message: promptMessage('Enter GPG key passphrase (if any, leave empty if none):'),
+        message: promptMessage(
+          'Enter GPG key passphrase (if any, leave empty if none):'
+        ),
         mask: '*',
       },
     ])
 
     // Extract key information
     try {
-      const keyInfo = await extractPrivateKeyInfo(privateKey, passphrase || undefined)
+      const keyInfo = await extractPrivateKeyInfo(
+        privateKey,
+        passphrase || undefined
+      )
 
       console.log()
       showSuccess('Key exported successfully!')
@@ -575,7 +634,10 @@ export class KeyManager {
       showKeyValue('  Email', keyInfo.email)
       showKeyValue('  Fingerprint', keyInfo.fingerprint)
       showKeyValue('  Algorithm', `${keyInfo.algorithm} (${keyInfo.keySize})`)
-      showKeyValue('  Passphrase Protected', keyInfo.passphraseProtected ? 'Yes' : 'No')
+      showKeyValue(
+        '  Passphrase Protected',
+        keyInfo.passphraseProtected ? 'Yes' : 'No'
+      )
       console.log()
 
       // Check if default should be set
@@ -595,7 +657,11 @@ export class KeyManager {
           where: { key: 'is_default', compare: 'is', value: 1 },
         })
         for (const kp of currentDefaults) {
-          this.db.update('keypair', { key: 'id', value: kp.id }, { is_default: false })
+          this.db.update(
+            'keypair',
+            { key: 'id', value: kp.id },
+            { is_default: false }
+          )
         }
       }
 
@@ -753,7 +819,9 @@ export class KeyManager {
   /**
    * Manage an individual key
    */
-  private async manageIndividualKey(keypair: Keypair): Promise<'main-menu' | void> {
+  private async manageIndividualKey(
+    keypair: Keypair
+  ): Promise<'main-menu' | void> {
     // Display key information
     printSectionHeader('Key Details')
     console.log(formatKeypairInfo(keypair))
@@ -774,7 +842,10 @@ export class KeyManager {
 
     // Add passphrase management option if applicable
     if (hasStoredPw) {
-      choices.push({ name: `${icons.unlocked} Clear saved passphrase ${colors.muted('(from keychain)')}`, value: 'clear-passphrase' })
+      choices.push({
+        name: `${icons.unlocked} Clear saved passphrase ${colors.muted('(from keychain)')}`,
+        value: 'clear-passphrase',
+      })
     }
 
     choices.push(
@@ -940,11 +1011,16 @@ export class KeyManager {
         name: 'newName',
         message: promptMessage('Enter new name:'),
         default: keypair.name,
-        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
-    this.db.update('keypair', { key: 'id', value: keypair.id }, { name: newName.trim() })
+    this.db.update(
+      'keypair',
+      { key: 'id', value: keypair.id },
+      { name: newName.trim() }
+    )
     console.log()
     showSuccess('Keypair renamed!')
     console.log()
@@ -958,11 +1034,19 @@ export class KeyManager {
 
     // Unset all defaults
     for (const kp of keypairs) {
-      this.db.update('keypair', { key: 'id', value: kp.id }, { is_default: false })
+      this.db.update(
+        'keypair',
+        { key: 'id', value: kp.id },
+        { is_default: false }
+      )
     }
 
     // Set new default
-    this.db.update('keypair', { key: 'id', value: keypairId }, { is_default: true })
+    this.db.update(
+      'keypair',
+      { key: 'id', value: keypairId },
+      { is_default: true }
+    )
 
     console.log()
     showSuccess('Set as default keypair!')
@@ -990,7 +1074,9 @@ export class KeyManager {
         console.log()
       } else {
         console.log()
-        showWarning('Could not remove passphrase (may not exist or keychain unavailable).')
+        showWarning(
+          'Could not remove passphrase (may not exist or keychain unavailable).'
+        )
         console.log()
       }
     }
@@ -1046,11 +1132,19 @@ export class KeyManager {
 
     // Unset all defaults
     for (const kp of keypairs) {
-      this.db.update('keypair', { key: 'id', value: kp.id }, { is_default: false })
+      this.db.update(
+        'keypair',
+        { key: 'id', value: kp.id },
+        { is_default: false }
+      )
     }
 
     // Set new default
-    this.db.update('keypair', { key: 'id', value: keypairId }, { is_default: true })
+    this.db.update(
+      'keypair',
+      { key: 'id', value: keypairId },
+      { is_default: true }
+    )
 
     console.log()
     showSuccess('Default keypair updated!')
@@ -1139,9 +1233,11 @@ export class KeyManager {
         const content = lines.join('\n')
 
         // Check if we have a complete key block and current line is empty
-        if (line.trim() === '' &&
-            content.includes('-----BEGIN PGP') &&
-            content.includes('-----END PGP')) {
+        if (
+          line.trim() === '' &&
+          content.includes('-----BEGIN PGP') &&
+          content.includes('-----END PGP')
+        ) {
           rl.close()
           resolve(content.trim())
         }
@@ -1202,7 +1298,9 @@ export class KeyManager {
   /**
    * Manage an individual contact
    */
-  private async manageIndividualContact(contact: Contact): Promise<'main-menu' | void> {
+  private async manageIndividualContact(
+    contact: Contact
+  ): Promise<'main-menu' | void> {
     // Display contact information
     printSectionHeader('Contact Details')
     showKeyValue('Name', contact.name)
@@ -1338,11 +1436,16 @@ export class KeyManager {
         name: 'newName',
         message: promptMessage('Enter new name:'),
         default: contact.name,
-        validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
-    this.db.update('contact', { key: 'id', value: contact.id }, { name: newName.trim() })
+    this.db.update(
+      'contact',
+      { key: 'id', value: contact.id },
+      { name: newName.trim() }
+    )
     console.log()
     showSuccess('Contact renamed!')
     console.log()
@@ -1361,7 +1464,11 @@ export class KeyManager {
       },
     ])
 
-    this.db.update('contact', { key: 'id', value: contact.id }, { notes: notes.trim() || null })
+    this.db.update(
+      'contact',
+      { key: 'id', value: contact.id },
+      { notes: notes.trim() || null }
+    )
     console.log()
     showSuccess('Notes updated!')
     console.log()
@@ -1372,12 +1479,20 @@ export class KeyManager {
    */
   private async toggleContactTrust(contact: Contact): Promise<void> {
     const newTrustStatus = !contact.trusted
-    this.db.update('contact', { key: 'id', value: contact.id }, {
-      trusted: newTrustStatus,
-      last_verified_at: newTrustStatus ? new Date().toISOString() : contact.last_verified_at
-    })
+    this.db.update(
+      'contact',
+      { key: 'id', value: contact.id },
+      {
+        trusted: newTrustStatus,
+        last_verified_at: newTrustStatus
+          ? new Date().toISOString()
+          : contact.last_verified_at,
+      }
+    )
     console.log()
-    showSuccess(`Contact marked as ${newTrustStatus ? 'trusted' : 'untrusted'}!`)
+    showSuccess(
+      `Contact marked as ${newTrustStatus ? 'trusted' : 'untrusted'}!`
+    )
     console.log()
   }
 

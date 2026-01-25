@@ -80,13 +80,11 @@ export function checkAndResetEscape(): boolean {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function escapeablePrompt<T = any>(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  questions: any,
+  questions: any
 ): Promise<T> {
   // Detect non-interactive mode
   if (!process.stdin.isTTY) {
-    throw new Error(
-      'Cannot prompt in non-interactive mode.',
-    )
+    throw new Error('Cannot prompt in non-interactive mode.')
   }
 
   // Create a promise that rejects when escape is pressed

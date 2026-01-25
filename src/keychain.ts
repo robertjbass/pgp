@@ -1,8 +1,4 @@
-import {
-  getPassword,
-  setPassword,
-  deletePassword,
-} from 'cross-keychain'
+import { getPassword, setPassword, deletePassword } from 'cross-keychain'
 
 const SERVICE_NAME = 'lpgp'
 
@@ -22,7 +18,11 @@ export async function storePassphrase(
   passphrase: string
 ): Promise<boolean> {
   try {
-    await setPassword(SERVICE_NAME, getAccountName(keypairFingerprint), passphrase)
+    await setPassword(
+      SERVICE_NAME,
+      getAccountName(keypairFingerprint),
+      passphrase
+    )
     return true
   } catch (error) {
     // Keychain may not be available on all systems
@@ -38,7 +38,10 @@ export async function getStoredPassphrase(
   keypairFingerprint: string
 ): Promise<string | null> {
   try {
-    const passphrase = await getPassword(SERVICE_NAME, getAccountName(keypairFingerprint))
+    const passphrase = await getPassword(
+      SERVICE_NAME,
+      getAccountName(keypairFingerprint)
+    )
     return passphrase ?? null
   } catch (error) {
     // Keychain may not be available or password not found
