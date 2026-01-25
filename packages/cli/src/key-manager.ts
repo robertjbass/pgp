@@ -8,6 +8,7 @@ import {
   extractPrivateKeyInfo,
   verifyKeyPair,
   formatKeypairInfo,
+  obfuscateEmail,
 } from './key-utils.js'
 import {
   isGpgInstalled,
@@ -17,6 +18,28 @@ import {
   getGpgHomeDir,
   type SystemKey,
 } from './system-keys.js'
+import { escapeablePrompt } from './prompts.js'
+import {
+  hasStoredPassphrase,
+  deleteStoredPassphrase,
+} from './keychain.js'
+import {
+  colors,
+  icons,
+  printBanner,
+  printSectionHeader,
+  printDivider,
+  showSuccess,
+  showError,
+  showWarning,
+  showLoading,
+  promptMessage,
+  mainMenuChoice,
+  backChoice,
+  exitChoice,
+  cancelChoice,
+  showKeyValue,
+} from './ui.js'
 
 export class KeyManager {
   private db: Db
@@ -51,42 +74,38 @@ export class KeyManager {
    * Prompt user to set up their first keypair
    */
   async setupFirstKeypair(): Promise<void> {
-    console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
-    console.log(chalk.blue('║') + '  🔑  First Time Setup              ' + chalk.blue('║'))
-    console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
+    printSectionHeader('First Time Setup')
 
-    console.log(
-      chalk.yellow(
-        'No PGP keypair found. You need to set up a keypair to use this tool.\n'
-      )
-    )
+    showWarning('No PGP keypair found. You need to set up a keypair to use this tool.')
+    console.log()
 
     // Check if GPG is available to offer system import
     const gpgAvailable = isGpgInstalled()
     const choices: any[] = [
-      { name: '📥 Import existing keypair', value: 'import' },
+      { name: `${icons.import} Import existing keypair`, value: 'import' },
     ]
 
     if (gpgAvailable) {
-      choices.push({ name: '💻 Import from System GPG', value: 'import-gpg' })
+      choices.push({ name: `${icons.gpg} Import from system GPG`, value: 'import-gpg' })
     }
 
     choices.push(
-      { name: '🔑 Generate new keypair', value: 'generate' },
-      { name: '👋 Exit', value: 'exit' }
+      { name: `${icons.generate} Generate new keypair`, value: 'generate' },
+      new inquirer.Separator(),
+      exitChoice()
     )
 
-    const { action } = await inquirer.prompt([
+    const { action } = await escapeablePrompt([
       {
         type: 'list',
         name: 'action',
-        message: 'What would you like to do?',
+        message: promptMessage('What would you like to do?'),
         choices,
       },
     ])
 
     if (action === 'exit') {
-      console.log(chalk.blue('\n👋 Goodbye!\n'))
+      console.log(colors.muted('\nGoodbye!\n'))
       process.exit(0)
     }
 
@@ -103,7 +122,7 @@ export class KeyManager {
    * Import a keypair (public + private keys)
    */
   async importKeypair(setAsDefault: boolean = false): Promise<void> {
-    console.log(chalk.blue('\n📥 Import Keypair\n'))
+    printSectionHeader('Import Keypair')
 
     // Check clipboard for keys
     let clipboardContent = ''
@@ -120,11 +139,11 @@ export class KeyManager {
     }
 
     // Prompt for keypair name
-    const { name } = await inquirer.prompt([
+    const { name } = await escapeablePrompt([
       {
         type: 'input',
         name: 'name',
-        message: 'Keypair name (e.g., "Personal", "Work"):',
+        message: promptMessage('Keypair name (e.g., "Personal", "Work"):'),
         default: 'Personal',
         validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
       },
@@ -137,7 +156,7 @@ export class KeyManager {
 
     // Check if both keys are in clipboard
     if (hasPublicInClipboard && hasPrivateInClipboard) {
-      const { useClipboard } = await inquirer.prompt([
+      const { useClipboard } = await escapeablePrompt([
         {
           type: 'confirm',
           name: 'useClipboard',
@@ -164,7 +183,7 @@ export class KeyManager {
 
     // Get public key if not already extracted
     if (!publicKey && hasPublicInClipboard) {
-      const { useClipboard } = await inquirer.prompt([
+      const { useClipboard } = await escapeablePrompt([
         {
           type: 'confirm',
           name: 'useClipboard',
@@ -182,19 +201,22 @@ export class KeyManager {
     }
 
     if (!publicKey) {
-      console.log(chalk.yellow('\nPaste your PGP PUBLIC key (press Enter to finish, or press Enter then Ctrl+D):'))
+      console.log(promptMessage('\nPaste your PGP PUBLIC key:'))
+      console.log(colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)'))
       publicKey = await this.readKeyInput()
     }
 
     // Validate public key format
     if (!publicKey.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
-      console.log(chalk.red('\n✗ Invalid public key format\n'))
+      console.log()
+      showError('Invalid public key format')
+      console.log()
       return
     }
 
     // Get private key if not already extracted
     if (!privateKey && hasPrivateInClipboard) {
-      const { useClipboard } = await inquirer.prompt([
+      const { useClipboard } = await escapeablePrompt([
         {
           type: 'confirm',
           name: 'useClipboard',
@@ -212,33 +234,37 @@ export class KeyManager {
     }
 
     if (!privateKey) {
-      console.log(chalk.yellow('\nPaste your PGP PRIVATE key (press Enter to finish, or press Enter then Ctrl+D):'))
+      console.log(promptMessage('\nPaste your PGP PRIVATE key:'))
+      console.log(colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)'))
       privateKey = await this.readKeyInput()
     }
 
     // Validate private key format
     if (!privateKey.includes('BEGIN PGP PRIVATE KEY BLOCK')) {
-      console.log(chalk.red('\n✗ Invalid private key format\n'))
+      console.log()
+      showError('Invalid private key format')
+      console.log()
       return
     }
 
     // Verify keys match
-    console.log(chalk.blue('\n⏳ Verifying keypair...'))
+    console.log()
+    showLoading('Verifying keypair...')
     const keysMatch = await verifyKeyPair(publicKey, privateKey)
 
     if (!keysMatch) {
-      console.log(
-        chalk.red('\n✗ Public and private keys do not match. Please try again.\n')
-      )
+      console.log()
+      showError('Public and private keys do not match. Please try again.')
+      console.log()
       return
     }
 
     // Prompt for passphrase if key is encrypted
-    const { passphrase } = await inquirer.prompt([
+    const { passphrase } = await escapeablePrompt([
       {
         type: 'password',
         name: 'passphrase',
-        message: 'Enter passphrase for private key (leave empty if none):',
+        message: promptMessage('Enter passphrase for private key (leave empty if none):'),
         mask: '*',
       },
     ])
@@ -247,18 +273,20 @@ export class KeyManager {
     try {
       const keyInfo = await extractPrivateKeyInfo(privateKey, passphrase || undefined)
 
-      console.log(chalk.blue('\n✓ Keypair verified!\n'))
-      console.log(chalk.gray('Key Information:'))
-      console.log(chalk.gray(`  Email: ${keyInfo.email}`))
-      console.log(chalk.gray(`  Fingerprint: ${keyInfo.fingerprint}`))
-      console.log(chalk.gray(`  Algorithm: ${keyInfo.algorithm} (${keyInfo.keySize})`))
-      console.log(chalk.gray(`  Passphrase Protected: ${keyInfo.passphraseProtected ? 'Yes' : 'No'}`))
+      console.log()
+      showSuccess('Keypair verified!')
+      console.log()
+      console.log(colors.muted('Key Information:'))
+      showKeyValue('  Email', keyInfo.email)
+      showKeyValue('  Fingerprint', keyInfo.fingerprint)
+      showKeyValue('  Algorithm', `${keyInfo.algorithm} (${keyInfo.keySize})`)
+      showKeyValue('  Passphrase Protected', keyInfo.passphraseProtected ? 'Yes' : 'No')
       console.log()
 
       // Check if default should be set
       let makeDefault = setAsDefault
       if (!setAsDefault) {
-        const { setDefault } = await inquirer.prompt([
+        const { setDefault } = await escapeablePrompt([
           {
             type: 'confirm',
             name: 'setDefault',
@@ -301,9 +329,13 @@ export class KeyManager {
         is_default: makeDefault,
       })
 
-      console.log(chalk.green('\n✓ Keypair imported successfully!\n'))
+      console.log()
+      showSuccess('Keypair imported successfully!')
+      console.log()
     } catch (error) {
-      console.log(chalk.red(`\n✗ Error importing keypair: ${error}\n`))
+      console.log()
+      showError(`Error importing keypair: ${error}`)
+      console.log()
     }
   }
 
@@ -311,23 +343,23 @@ export class KeyManager {
    * Generate a new PGP keypair
    */
   async generateKeypair(setAsDefault: boolean = false): Promise<void> {
-    console.log(chalk.blue('\n🔑 Generate New Keypair\n'))
+    printSectionHeader('Generate New Keypair')
 
     // Prompt for keypair details
-    const { name: userName } = await inquirer.prompt([
+    const { name: userName } = await escapeablePrompt([
       {
         type: 'input',
         name: 'name',
-        message: 'Your name:',
+        message: promptMessage('Your name:'),
         validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
-    const { email } = await inquirer.prompt([
+    const { email } = await escapeablePrompt([
       {
         type: 'input',
         name: 'email',
-        message: 'Your email:',
+        message: promptMessage('Your email:'),
         validate: (input: string) => {
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
           return emailRegex.test(input) || 'Please enter a valid email address'
@@ -335,37 +367,39 @@ export class KeyManager {
       },
     ])
 
-    const { keypairName } = await inquirer.prompt([
+    const { keypairName } = await escapeablePrompt([
       {
         type: 'input',
         name: 'keypairName',
-        message: 'Keypair name (e.g., "Personal", "Work"):',
+        message: promptMessage('Keypair name (e.g., "Personal", "Work"):'),
         default: 'Personal',
         validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
-    const { passphrase } = await inquirer.prompt([
+    const { passphrase } = await escapeablePrompt([
       {
         type: 'password',
         name: 'passphrase',
-        message: 'Enter a passphrase to protect your private key:',
+        message: promptMessage('Enter a passphrase to protect your private key:'),
         mask: '*',
         validate: (input: string) => input.length >= 8 || 'Passphrase must be at least 8 characters',
       },
     ])
 
-    const { passphraseConfirm } = await inquirer.prompt([
+    const { passphraseConfirm } = await escapeablePrompt([
       {
         type: 'password',
         name: 'passphraseConfirm',
-        message: 'Confirm passphrase:',
+        message: promptMessage('Confirm passphrase:'),
         mask: '*',
         validate: (input: string) => input === passphrase || 'Passphrases do not match',
       },
     ])
 
-    console.log(chalk.blue('\n⏳ Generating keypair... (this may take a moment)\n'))
+    console.log()
+    showLoading('Generating keypair... (this may take a moment)')
+    console.log()
 
     try {
       // Generate the keypair
@@ -412,19 +446,19 @@ export class KeyManager {
 
       this.db.insert('keypair', keypair)
 
-      console.log(chalk.green('✓ Keypair generated successfully!\n'))
-      console.log(chalk.blue('Keypair details:'))
-      console.log(chalk.gray('─'.repeat(50)))
-      console.log(`Name: ${keypairName}`)
-      console.log(`Email: ${publicKeyInfo.email}`)
-      console.log(`Fingerprint: ${publicKeyInfo.fingerprint}`)
-      console.log(`Algorithm: ${publicKeyInfo.algorithm} (${publicKeyInfo.keySize} bits)`)
-      console.log(chalk.gray('─'.repeat(50)) + '\n')
+      showSuccess('Keypair generated successfully!')
+      console.log()
+      console.log(colors.infoBold('Keypair details:'))
+      printDivider()
+      showKeyValue('Name', keypairName)
+      showKeyValue('Email', publicKeyInfo.email)
+      showKeyValue('Fingerprint', publicKeyInfo.fingerprint)
+      showKeyValue('Algorithm', `${publicKeyInfo.algorithm} (${publicKeyInfo.keySize} bits)`)
+      printDivider()
+      console.log()
     } catch (error) {
-      console.log(
-        chalk.red('\n✗ Failed to generate keypair:'),
-        error instanceof Error ? error.message : error
-      )
+      console.log()
+      showError(`Failed to generate keypair: ${error instanceof Error ? error.message : error}`)
     }
   }
 
@@ -432,92 +466,100 @@ export class KeyManager {
    * Import a keypair from system GPG
    */
   async importFromSystemGpg(): Promise<void> {
-    console.log(chalk.blue('\n💻 Import from System GPG\n'))
+    printSectionHeader('Import from System GPG')
 
     // Check if GPG is installed
     if (!isGpgInstalled()) {
-      console.log(chalk.yellow('GPG is not installed on this system.\n'))
-      console.log(chalk.gray('Install GPG to import keys from your system keyring.\n'))
+      showWarning('GPG is not installed on this system.')
+      console.log(colors.muted('Install GPG to import keys from your system keyring.'))
+      console.log()
       return
     }
 
     const gpgHome = getGpgHomeDir()
     if (gpgHome) {
-      console.log(chalk.gray(`GPG directory found: ${gpgHome}\n`))
+      console.log(colors.muted(`GPG directory found: ${gpgHome}\n`))
     }
 
     // List available keys
     const { secretKeys } = listGpgKeys()
 
     if (secretKeys.length === 0) {
-      console.log(chalk.yellow('No secret keys found in your GPG keyring.\n'))
-      console.log(chalk.gray('Generate or import keys into GPG first using:'))
-      console.log(chalk.gray('  gpg --gen-key\n'))
+      showWarning('No secret keys found in your GPG keyring.')
+      console.log(colors.muted('Generate or import keys into GPG first using:'))
+      console.log(colors.muted('  gpg --gen-key'))
+      console.log()
       return
     }
 
-    console.log(chalk.blue('Available GPG keys:\n'))
+    console.log(colors.infoBold('Available GPG keys:\n'))
     secretKeys.forEach((key, index) => {
-      console.log(chalk.gray(`${index + 1}. ${key.name} <${key.email}>`))
-      console.log(chalk.gray(`   Fingerprint: ${key.fingerprint}`))
+      console.log(colors.muted(`${index + 1}. ${key.name} <${key.email}>`))
+      console.log(colors.muted(`   Fingerprint: ${key.fingerprint}`))
       console.log()
     })
 
     // Prompt user to select a key
-    const { selectedIndex } = await inquirer.prompt([
+    const { selectedIndex } = await escapeablePrompt([
       {
         type: 'list',
         name: 'selectedIndex',
-        message: 'Select a key to import:',
+        message: promptMessage('Select a key to import:'),
         choices: [
           ...secretKeys.map((key, index) => ({
-            name: `${key.name} <${key.email}>`,
+            name: `${icons.key} ${key.name} ${colors.muted(`<${key.email}>`)}`,
             value: index,
           })),
-          { name: '← Cancel', value: -1 },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          new inquirer.Separator(),
+          cancelChoice(),
+          mainMenuChoice(),
+          new inquirer.Separator(),
         ],
       },
     ])
 
-    if (selectedIndex === -1 || selectedIndex === 'main-menu') {
+    if (selectedIndex === -1 || selectedIndex === 'cancel' || selectedIndex === 'main-menu') {
       return
     }
 
     const selectedKey = secretKeys[selectedIndex]
     if (!selectedKey) {
-      console.log(chalk.red('✗ Invalid key selection\n'))
+      showError('Invalid key selection')
+      console.log()
       return
     }
 
     // Export the keys
-    console.log(chalk.blue('\n⏳ Exporting keys from GPG...\n'))
+    console.log()
+    showLoading('Exporting keys from GPG...')
+    console.log()
 
     const publicKey = exportGpgPublicKey(selectedKey.fingerprint)
     const privateKey = exportGpgSecretKey(selectedKey.fingerprint)
 
     if (!publicKey || !privateKey) {
-      console.log(chalk.red('✗ Failed to export keys from GPG\n'))
+      showError('Failed to export keys from GPG')
+      console.log()
       return
     }
 
     // Prompt for keypair name
-    const { name } = await inquirer.prompt([
+    const { name } = await escapeablePrompt([
       {
         type: 'input',
         name: 'name',
-        message: 'Keypair name:',
+        message: promptMessage('Keypair name:'),
         default: selectedKey.name || 'Imported from GPG',
         validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
     // Prompt for passphrase
-    const { passphrase } = await inquirer.prompt([
+    const { passphrase } = await escapeablePrompt([
       {
         type: 'password',
         name: 'passphrase',
-        message: 'Enter GPG key passphrase (if any, leave empty if none):',
+        message: promptMessage('Enter GPG key passphrase (if any, leave empty if none):'),
         mask: '*',
       },
     ])
@@ -526,16 +568,18 @@ export class KeyManager {
     try {
       const keyInfo = await extractPrivateKeyInfo(privateKey, passphrase || undefined)
 
-      console.log(chalk.blue('\n✓ Key exported successfully!\n'))
-      console.log(chalk.gray('Key Information:'))
-      console.log(chalk.gray(`  Email: ${keyInfo.email}`))
-      console.log(chalk.gray(`  Fingerprint: ${keyInfo.fingerprint}`))
-      console.log(chalk.gray(`  Algorithm: ${keyInfo.algorithm} (${keyInfo.keySize})`))
-      console.log(chalk.gray(`  Passphrase Protected: ${keyInfo.passphraseProtected ? 'Yes' : 'No'}`))
+      console.log()
+      showSuccess('Key exported successfully!')
+      console.log()
+      console.log(colors.muted('Key Information:'))
+      showKeyValue('  Email', keyInfo.email)
+      showKeyValue('  Fingerprint', keyInfo.fingerprint)
+      showKeyValue('  Algorithm', `${keyInfo.algorithm} (${keyInfo.keySize})`)
+      showKeyValue('  Passphrase Protected', keyInfo.passphraseProtected ? 'Yes' : 'No')
       console.log()
 
       // Check if default should be set
-      const { setDefault } = await inquirer.prompt([
+      const { setDefault } = await escapeablePrompt([
         {
           type: 'confirm',
           name: 'setDefault',
@@ -576,9 +620,13 @@ export class KeyManager {
         is_default: setDefault,
       })
 
-      console.log(chalk.green('\n✓ Keypair imported from GPG successfully!\n'))
+      console.log()
+      showSuccess('Keypair imported from GPG successfully!')
+      console.log()
     } catch (error) {
-      console.log(chalk.red(`\n✗ Error importing keypair: ${error}\n`))
+      console.log()
+      showError(`Error importing keypair: ${error}`)
+      console.log()
     }
   }
 
@@ -589,37 +637,40 @@ export class KeyManager {
     const keypairs = this.db.select({ table: 'keypair' })
 
     if (keypairs.length === 0) {
-      console.log(chalk.yellow('\nNo keypairs found.\n'))
+      console.log()
+      showWarning('No keypairs found.')
+      console.log()
       return
     }
 
-    console.log(chalk.blue('\n🔑 Your Keypairs:\n'))
+    console.log(colors.infoBold('\nYour Keypairs:\n'))
 
     for (const keypair of keypairs) {
-      console.log(chalk.gray('─'.repeat(50)))
+      printDivider()
       console.log(formatKeypairInfo(keypair))
     }
 
-    console.log(chalk.gray('─'.repeat(50)) + '\n')
+    printDivider()
+    console.log()
   }
 
   /**
    * Show key management menu
    */
   async showKeyManagementMenu(): Promise<'back' | 'main-menu' | void> {
-    const { action } = await inquirer.prompt([
+    const { action } = await escapeablePrompt([
       {
         type: 'list',
         name: 'action',
-        message: 'Key Management',
+        message: promptMessage('Key Management'),
         choices: [
-          { name: '🔑 View/Manage My Keys', value: 'view' },
-          { name: '👥 View/Manage Contacts', value: 'contacts' },
-          { name: '📥 Import keypair', value: 'import' },
-          { name: '💻 Import from System GPG', value: 'import-gpg' },
-          { name: '🔐 Generate new keypair', value: 'generate' },
-          { name: '← Back to main menu', value: 'back' },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          { name: `${icons.key} View/manage my keys`, value: 'view' },
+          { name: `${icons.contact} View/manage contacts`, value: 'contacts' },
+          { name: `${icons.import} Import keypair`, value: 'import' },
+          { name: `${icons.gpg} Import from system GPG`, value: 'import-gpg' },
+          { name: `${icons.generate} Generate new keypair`, value: 'generate' },
+          new inquirer.Separator(),
+          mainMenuChoice(),
         ],
       },
     ])
@@ -660,22 +711,26 @@ export class KeyManager {
     const keypairs = this.db.select({ table: 'keypair' })
 
     if (keypairs.length === 0) {
-      console.log(chalk.yellow('\nNo keypairs found.\n'))
+      console.log()
+      showWarning('No keypairs found.')
+      console.log()
       return
     }
 
-    const { keypairId } = await inquirer.prompt([
+    const { keypairId } = await escapeablePrompt([
       {
         type: 'list',
         name: 'keypairId',
-        message: 'Select a key to manage:',
+        message: promptMessage('Select a key to manage:'),
         choices: [
           ...keypairs.map((kp) => ({
-            name: `${kp.name} - ${kp.email}${kp.is_default ? ' ✓ Default' : ''}`,
+            name: `${icons.key} ${kp.name} ${colors.muted(`- ${obfuscateEmail(kp.email)}`)}${kp.is_default ? ` ${icons.default} Default` : ''}`,
             value: kp.id,
           })),
-          { name: '← Back', value: null },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          new inquirer.Separator(),
+          backChoice(),
+          mainMenuChoice(),
+          new inquirer.Separator(),
         ],
       },
     ])
@@ -684,7 +739,7 @@ export class KeyManager {
       return 'main-menu'
     }
 
-    if (keypairId === null) {
+    if (keypairId === null || keypairId === 'back') {
       return
     }
 
@@ -700,26 +755,41 @@ export class KeyManager {
    */
   private async manageIndividualKey(keypair: Keypair): Promise<'main-menu' | void> {
     // Display key information
-    console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
-    console.log(chalk.blue('║') + '  🔑  Key Details                   ' + chalk.blue('║'))
-    console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
+    printSectionHeader('Key Details')
     console.log(formatKeypairInfo(keypair))
     console.log()
 
-    const { action } = await inquirer.prompt([
+    // Check if passphrase is stored in keychain
+    const hasStoredPw = keypair.passphrase_protected
+      ? await hasStoredPassphrase(keypair.fingerprint)
+      : false
+
+    // Build menu choices dynamically
+    const choices: any[] = [
+      { name: `${icons.copy} Copy public key`, value: 'copy-public' },
+      { name: `${icons.export} Export keypair`, value: 'export' },
+      { name: `${icons.edit} Rename key`, value: 'rename' },
+      { name: `${icons.key} Set as default`, value: 'set-default' },
+    ]
+
+    // Add passphrase management option if applicable
+    if (hasStoredPw) {
+      choices.push({ name: `${icons.unlocked} Clear saved passphrase ${colors.muted('(from keychain)')}`, value: 'clear-passphrase' })
+    }
+
+    choices.push(
+      { name: `${icons.exit} Delete key`, value: 'delete' },
+      new inquirer.Separator(),
+      backChoice('Back to key list'),
+      mainMenuChoice()
+    )
+
+    const { action } = await escapeablePrompt([
       {
         type: 'list',
         name: 'action',
-        message: 'What would you like to do?',
-        choices: [
-          { name: '📋 Copy public key', value: 'copy-public' },
-          { name: '💾 Export keypair', value: 'export' },
-          { name: '✏️  Rename key', value: 'rename' },
-          { name: '⭐ Set as default', value: 'set-default' },
-          { name: '🗑️  Delete key', value: 'delete' },
-          { name: '← Back to key list', value: 'back' },
-          { name: '🏠 Main menu', value: 'main-menu' },
-        ],
+        message: promptMessage('What would you like to do?'),
+        choices,
       },
     ])
 
@@ -748,6 +818,9 @@ export class KeyManager {
         })[0]
         if (refreshed) return this.manageIndividualKey(refreshed)
         break
+      case 'clear-passphrase':
+        await this.clearStoredPassphrase(keypair)
+        return this.manageIndividualKey(keypair)
       case 'delete':
         const deleted = await this.deleteKeypairById(keypair.id)
         if (!deleted) {
@@ -765,14 +838,23 @@ export class KeyManager {
    * Copy public key to clipboard
    */
   private async copyPublicKey(keypair: Keypair): Promise<void> {
+    console.clear()
+    printBanner()
+
+    console.log(colors.successBold('Public Key:\n'))
+    printDivider()
+    console.log(keypair.public_key)
+    printDivider()
+
     try {
       const clipboardy = (await import('clipboardy')).default
       await clipboardy.write(keypair.public_key)
-      console.log(chalk.green('\n✓ Public key copied to clipboard!\n'))
+      console.log()
+      showSuccess('Public key copied to clipboard')
+      console.log()
     } catch (error) {
-      console.log(chalk.red('\n✗ Failed to copy to clipboard\n'))
-      console.log(chalk.gray('Public key:'))
-      console.log(keypair.public_key)
+      console.log()
+      showWarning('Clipboard unavailable')
       console.log()
     }
   }
@@ -781,32 +863,34 @@ export class KeyManager {
    * Export keypair to files
    */
   private async exportKeypair(keypair: Keypair): Promise<void> {
-    const { exportType } = await inquirer.prompt([
+    const { exportType } = await escapeablePrompt([
       {
         type: 'list',
         name: 'exportType',
-        message: 'What would you like to export?',
+        message: promptMessage('What would you like to export?'),
         choices: [
-          { name: '🔓 Public key only', value: 'public' },
-          { name: '🔐 Both public and private keys', value: 'both' },
-          { name: '← Cancel', value: 'cancel' },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          { name: `${icons.view} Public key only`, value: 'public' },
+          { name: `${icons.copy} Both public and private keys`, value: 'both' },
+          new inquirer.Separator(),
+          cancelChoice(),
+          mainMenuChoice(),
         ],
       },
     ])
 
     if (exportType === 'cancel' || exportType === 'main-menu') return
 
-    const { exportMethod } = await inquirer.prompt([
+    const { exportMethod } = await escapeablePrompt([
       {
         type: 'list',
         name: 'exportMethod',
-        message: 'How would you like to export?',
+        message: promptMessage('How would you like to export?'),
         choices: [
-          { name: '📋 Copy to clipboard', value: 'clipboard' },
-          { name: '🖥️  Display on screen', value: 'display' },
-          { name: '← Cancel', value: 'cancel' },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          { name: `${icons.clipboard} Copy to clipboard`, value: 'clipboard' },
+          { name: `${icons.view} Display on screen`, value: 'display' },
+          new inquirer.Separator(),
+          cancelChoice(),
+          mainMenuChoice(),
         ],
       },
     ])
@@ -820,19 +904,28 @@ export class KeyManager {
       content = `PUBLIC KEY:\n${keypair.public_key}\n\nPRIVATE KEY:\n${keypair.private_key}`
     }
 
+    console.clear()
+    printBanner()
+
+    const label = exportType === 'public' ? 'Public Key' : 'Keypair'
+    console.log(colors.successBold(`Exported ${label}:\n`))
+    printDivider()
+    console.log(content)
+    printDivider()
+
     if (exportMethod === 'clipboard') {
       try {
         const clipboardy = (await import('clipboardy')).default
         await clipboardy.write(content)
-        console.log(chalk.green(`\n✓ ${exportType === 'public' ? 'Public key' : 'Keypair'} copied to clipboard!\n`))
+        console.log()
+        showSuccess(`${label} copied to clipboard`)
+        console.log()
       } catch (error) {
-        console.log(chalk.red('\n✗ Failed to copy to clipboard\n'))
+        console.log()
+        showWarning('Clipboard unavailable')
+        console.log()
       }
     } else {
-      console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
-      console.log(chalk.blue('║') + '  📄 Exported Key(s)                ' + chalk.blue('║'))
-      console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
-      console.log(content)
       console.log()
     }
   }
@@ -841,18 +934,20 @@ export class KeyManager {
    * Rename a keypair
    */
   private async renameKeypair(keypair: Keypair): Promise<void> {
-    const { newName } = await inquirer.prompt([
+    const { newName } = await escapeablePrompt([
       {
         type: 'input',
         name: 'newName',
-        message: 'Enter new name:',
+        message: promptMessage('Enter new name:'),
         default: keypair.name,
         validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
     this.db.update('keypair', { key: 'id', value: keypair.id }, { name: newName.trim() })
-    console.log(chalk.green('\n✓ Keypair renamed!\n'))
+    console.log()
+    showSuccess('Keypair renamed!')
+    console.log()
   }
 
   /**
@@ -869,25 +964,56 @@ export class KeyManager {
     // Set new default
     this.db.update('keypair', { key: 'id', value: keypairId }, { is_default: true })
 
-    console.log(chalk.green('\n✓ Set as default keypair!\n'))
+    console.log()
+    showSuccess('Set as default keypair!')
+    console.log()
+  }
+
+  /**
+   * Clear stored passphrase from system keychain
+   */
+  private async clearStoredPassphrase(keypair: Keypair): Promise<void> {
+    const { confirm } = await escapeablePrompt([
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: promptMessage('Remove saved passphrase from system keychain?'),
+        default: true,
+      },
+    ])
+
+    if (confirm) {
+      const deleted = await deleteStoredPassphrase(keypair.fingerprint)
+      if (deleted) {
+        console.log()
+        showSuccess('Saved passphrase removed from system keychain.')
+        console.log()
+      } else {
+        console.log()
+        showWarning('Could not remove passphrase (may not exist or keychain unavailable).')
+        console.log()
+      }
+    }
   }
 
   /**
    * Delete a keypair by ID
    */
   private async deleteKeypairById(keypairId: number): Promise<boolean> {
-    const { confirm } = await inquirer.prompt([
+    const { confirm } = await escapeablePrompt([
       {
         type: 'confirm',
         name: 'confirm',
-        message: chalk.red('Are you sure? This action cannot be undone.'),
+        message: colors.error('Are you sure? This action cannot be undone.'),
         default: false,
       },
     ])
 
     if (confirm) {
       this.db.delete('keypair', { key: 'id', value: keypairId })
-      console.log(chalk.green('\n✓ Keypair deleted.\n'))
+      console.log()
+      showSuccess('Keypair deleted.')
+      console.log()
       return true
     }
     return false
@@ -900,17 +1026,19 @@ export class KeyManager {
     const keypairs = this.db.select({ table: 'keypair' })
 
     if (keypairs.length === 0) {
-      console.log(chalk.yellow('\nNo keypairs available.\n'))
+      console.log()
+      showWarning('No keypairs available.')
+      console.log()
       return
     }
 
-    const { keypairId } = await inquirer.prompt([
+    const { keypairId } = await escapeablePrompt([
       {
         type: 'list',
         name: 'keypairId',
-        message: 'Select default keypair:',
+        message: promptMessage('Select default keypair:'),
         choices: keypairs.map((kp) => ({
-          name: `${kp.name} (${kp.email}) ${kp.is_default ? '✓ Current Default' : ''}`,
+          name: `${icons.key} ${kp.name} ${colors.muted(`(${obfuscateEmail(kp.email)})`)} ${kp.is_default ? `${icons.default} Current Default` : ''}`,
           value: kp.id,
         })),
       },
@@ -924,7 +1052,9 @@ export class KeyManager {
     // Set new default
     this.db.update('keypair', { key: 'id', value: keypairId }, { is_default: true })
 
-    console.log(chalk.green('\n✓ Default keypair updated!\n'))
+    console.log()
+    showSuccess('Default keypair updated!')
+    console.log()
   }
 
   /**
@@ -934,34 +1064,38 @@ export class KeyManager {
     const keypairs = this.db.select({ table: 'keypair' })
 
     if (keypairs.length === 0) {
-      console.log(chalk.yellow('\nNo keypairs available.\n'))
+      console.log()
+      showWarning('No keypairs available.')
+      console.log()
       return
     }
 
-    const { keypairId } = await inquirer.prompt([
+    const { keypairId } = await escapeablePrompt([
       {
         type: 'list',
         name: 'keypairId',
-        message: 'Select keypair to delete:',
+        message: promptMessage('Select keypair to delete:'),
         choices: keypairs.map((kp) => ({
-          name: `${kp.name} (${kp.email})`,
+          name: `${icons.key} ${kp.name} ${colors.muted(`(${obfuscateEmail(kp.email)})`)}`,
           value: kp.id,
         })),
       },
     ])
 
-    const { confirm } = await inquirer.prompt([
+    const { confirm } = await escapeablePrompt([
       {
         type: 'confirm',
         name: 'confirm',
-        message: chalk.red('Are you sure? This action cannot be undone.'),
+        message: colors.error('Are you sure? This action cannot be undone.'),
         default: false,
       },
     ])
 
     if (confirm) {
       this.db.delete('keypair', { key: 'id', value: keypairId })
-      console.log(chalk.green('\n✓ Keypair deleted.\n'))
+      console.log()
+      showSuccess('Keypair deleted.')
+      console.log()
     }
   }
 
@@ -975,6 +1109,7 @@ export class KeyManager {
         input: process.stdin,
         output: process.stdout,
       })
+      rl.setPrompt('')
 
       rl.on('line', (line: string) => {
         lines.push(line)
@@ -997,6 +1132,7 @@ export class KeyManager {
         input: process.stdin,
         output: process.stdout,
       })
+      rl.setPrompt('')
 
       rl.on('line', (line: string) => {
         lines.push(line)
@@ -1024,22 +1160,26 @@ export class KeyManager {
     const contacts = this.db.select({ table: 'contact' })
 
     if (contacts.length === 0) {
-      console.log(chalk.yellow('\nNo contacts found.\n'))
+      console.log()
+      showWarning('No contacts found.')
+      console.log()
       return
     }
 
-    const { contactId } = await inquirer.prompt([
+    const { contactId } = await escapeablePrompt([
       {
         type: 'list',
         name: 'contactId',
-        message: 'Select a contact to manage:',
+        message: promptMessage('Select a contact to manage:'),
         choices: [
           ...contacts.map((c) => ({
-            name: `${c.name} - ${c.email}`,
+            name: `${icons.contact} ${c.name} ${colors.muted(`- ${c.email}`)}`,
             value: c.id,
           })),
-          { name: '← Back', value: null },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          new inquirer.Separator(),
+          backChoice(),
+          mainMenuChoice(),
+          new inquirer.Separator(),
         ],
       },
     ])
@@ -1048,7 +1188,7 @@ export class KeyManager {
       return 'main-menu'
     }
 
-    if (contactId === null) {
+    if (contactId === null || contactId === 'back') {
       return
     }
 
@@ -1064,36 +1204,35 @@ export class KeyManager {
    */
   private async manageIndividualContact(contact: Contact): Promise<'main-menu' | void> {
     // Display contact information
-    console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
-    console.log(chalk.blue('║') + '  👤 Contact Details                ' + chalk.blue('║'))
-    console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
-    console.log(chalk.cyan('Name:') + ` ${contact.name}`)
-    console.log(chalk.cyan('Email:') + ` ${contact.email}`)
-    console.log(chalk.cyan('Fingerprint:') + ` ${contact.fingerprint}`)
-    console.log(chalk.cyan('Algorithm:') + ` ${contact.algorithm} (${contact.key_size})`)
-    console.log(chalk.cyan('Trusted:') + ` ${contact.trusted ? 'Yes' : 'No'}`)
+    printSectionHeader('Contact Details')
+    showKeyValue('Name', contact.name)
+    showKeyValue('Email', contact.email)
+    showKeyValue('Fingerprint', contact.fingerprint)
+    showKeyValue('Algorithm', `${contact.algorithm} (${contact.key_size})`)
+    showKeyValue('Trusted', contact.trusted ? 'Yes' : 'No')
     if (contact.expires_at) {
-      console.log(chalk.cyan('Expires:') + ` ${contact.expires_at}`)
+      showKeyValue('Expires', contact.expires_at)
     }
     if (contact.notes) {
-      console.log(chalk.cyan('Notes:') + ` ${contact.notes}`)
+      showKeyValue('Notes', contact.notes)
     }
     console.log()
 
-    const { action } = await inquirer.prompt([
+    const { action } = await escapeablePrompt([
       {
         type: 'list',
         name: 'action',
-        message: 'What would you like to do?',
+        message: promptMessage('What would you like to do?'),
         choices: [
-          { name: '📋 Copy public key', value: 'copy-public' },
-          { name: '🖥️  View public key', value: 'view-public' },
-          { name: '✏️  Rename contact', value: 'rename' },
-          { name: '📝 Edit notes', value: 'edit-notes' },
-          { name: '⭐ Toggle trust', value: 'toggle-trust' },
-          { name: '🗑️  Delete contact', value: 'delete' },
-          { name: '← Back to contact list', value: 'back' },
-          { name: '🏠 Main menu', value: 'main-menu' },
+          { name: `${icons.copy} Copy public key`, value: 'copy-public' },
+          { name: `${icons.view} View public key`, value: 'view-public' },
+          { name: `${icons.edit} Rename contact`, value: 'rename' },
+          { name: `${icons.notes} Edit notes`, value: 'edit-notes' },
+          { name: `${icons.trust} Toggle trust`, value: 'toggle-trust' },
+          { name: `${icons.exit} Delete contact`, value: 'delete' },
+          new inquirer.Separator(),
+          backChoice('Back to contact list'),
+          mainMenuChoice(),
         ],
       },
     ])
@@ -1146,14 +1285,23 @@ export class KeyManager {
    * Copy contact's public key to clipboard
    */
   private async copyContactPublicKey(contact: Contact): Promise<void> {
+    console.clear()
+    printBanner()
+
+    console.log(colors.successBold(`${contact.name}'s Public Key:\n`))
+    printDivider()
+    console.log(contact.public_key)
+    printDivider()
+
     try {
       const clipboardy = (await import('clipboardy')).default
       await clipboardy.write(contact.public_key)
-      console.log(chalk.green('\n✓ Public key copied to clipboard!\n'))
+      console.log()
+      showSuccess('Public key copied to clipboard')
+      console.log()
     } catch (error) {
-      console.log(chalk.red('\n✗ Failed to copy to clipboard\n'))
-      console.log(chalk.gray('Public key:'))
-      console.log(contact.public_key)
+      console.log()
+      showWarning('Clipboard unavailable')
       console.log()
     }
   }
@@ -1162,17 +1310,20 @@ export class KeyManager {
    * View contact's public key
    */
   private async viewContactPublicKey(contact: Contact): Promise<void> {
-    console.log(chalk.blue('\n╔════════════════════════════════════════╗'))
-    console.log(chalk.blue('║') + '  📄 Public Key                     ' + chalk.blue('║'))
-    console.log(chalk.blue('╚════════════════════════════════════════╝\n'))
+    console.clear()
+    printBanner()
+
+    console.log(colors.successBold(`${contact.name}'s Public Key:\n`))
+    printDivider()
     console.log(contact.public_key)
+    printDivider()
     console.log()
 
-    await inquirer.prompt([
+    await escapeablePrompt([
       {
         type: 'input',
         name: 'continue',
-        message: chalk.cyan('Press Enter to continue...'),
+        message: colors.muted('Press Enter to continue...'),
       },
     ])
   }
@@ -1181,35 +1332,39 @@ export class KeyManager {
    * Rename a contact
    */
   private async renameContact(contact: Contact): Promise<void> {
-    const { newName } = await inquirer.prompt([
+    const { newName } = await escapeablePrompt([
       {
         type: 'input',
         name: 'newName',
-        message: 'Enter new name:',
+        message: promptMessage('Enter new name:'),
         default: contact.name,
         validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
       },
     ])
 
     this.db.update('contact', { key: 'id', value: contact.id }, { name: newName.trim() })
-    console.log(chalk.green('\n✓ Contact renamed!\n'))
+    console.log()
+    showSuccess('Contact renamed!')
+    console.log()
   }
 
   /**
    * Edit contact notes
    */
   private async editContactNotes(contact: Contact): Promise<void> {
-    const { notes } = await inquirer.prompt([
+    const { notes } = await escapeablePrompt([
       {
         type: 'input',
         name: 'notes',
-        message: 'Enter notes:',
+        message: promptMessage('Enter notes:'),
         default: contact.notes || '',
       },
     ])
 
     this.db.update('contact', { key: 'id', value: contact.id }, { notes: notes.trim() || null })
-    console.log(chalk.green('\n✓ Notes updated!\n'))
+    console.log()
+    showSuccess('Notes updated!')
+    console.log()
   }
 
   /**
@@ -1221,25 +1376,29 @@ export class KeyManager {
       trusted: newTrustStatus,
       last_verified_at: newTrustStatus ? new Date().toISOString() : contact.last_verified_at
     })
-    console.log(chalk.green(`\n✓ Contact marked as ${newTrustStatus ? 'trusted' : 'untrusted'}!\n`))
+    console.log()
+    showSuccess(`Contact marked as ${newTrustStatus ? 'trusted' : 'untrusted'}!`)
+    console.log()
   }
 
   /**
    * Delete a contact
    */
   private async deleteContact(contactId: number): Promise<boolean> {
-    const { confirm } = await inquirer.prompt([
+    const { confirm } = await escapeablePrompt([
       {
         type: 'confirm',
         name: 'confirm',
-        message: chalk.red('Are you sure? This action cannot be undone.'),
+        message: colors.error('Are you sure? This action cannot be undone.'),
         default: false,
       },
     ])
 
     if (confirm) {
       this.db.delete('contact', { key: 'id', value: contactId })
-      console.log(chalk.green('\n✓ Contact deleted.\n'))
+      console.log()
+      showSuccess('Contact deleted.')
+      console.log()
       return true
     }
     return false

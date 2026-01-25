@@ -9,9 +9,40 @@ import clipboardy from 'clipboardy'
 import { Db } from './db.js'
 import { KeyManager } from './key-manager.js'
 import { extractPublicKeyInfo } from './key-utils.js'
+import {
+  escapeablePrompt,
+  enableGlobalEscape,
+  checkAndResetEscape,
+  EscapeError,
+} from './prompts.js'
+import {
+  getStoredPassphrase,
+  storePassphrase,
+  hasStoredPassphrase,
+} from './keychain.js'
+import {
+  colors,
+  icons,
+  printBanner,
+  printDivider,
+  showSuccess,
+  showError,
+  showWarning,
+  showLoading,
+  promptMessage,
+  mainMenuChoice,
+  backChoice,
+  exitChoice,
+  cancelChoice,
+} from './ui.js'
 
 // Config to allow weak keys like DSA (not recommended for production)
-const weakKeyConfig = { rejectPublicKeyAlgorithms: new Set() }
+const weakKeyConfig = {
+  rejectPublicKeyAlgorithms: new Set(),
+  rejectHashAlgorithms: new Set(),
+  rejectMessageHashAlgorithms: new Set(),
+  rejectCurves: new Set(),
+}
 
 // Initialize database and key manager
 const db = new Db()
@@ -66,30 +97,75 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
   let passphrase = ''
   if (defaultKeypair.passphrase_protected) {
     if (passphraseCache.has(defaultKeypair.id)) {
-      // Use cached passphrase
+      // Use session-cached passphrase
       passphrase = passphraseCache.get(defaultKeypair.id)!
     } else {
-      // Prompt for passphrase and cache it
-      const { passphraseInput } = await inquirer.prompt([
-        {
-          type: 'password',
-          name: 'passphraseInput',
-          message: chalk.yellow('Enter your private key passphrase:'),
-          mask: '*',
-        },
-      ])
-      passphrase = passphraseInput
+      // Check if passphrase is stored in system keychain
+      const storedPassphrase = await getStoredPassphrase(defaultKeypair.fingerprint)
+      if (storedPassphrase) {
+        // Validate the stored passphrase
+        try {
+          await openpgp.decryptKey({
+            privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key, config: weakKeyConfig }),
+            passphrase: storedPassphrase,
+            config: weakKeyConfig,
+          })
+          // Stored passphrase is valid, use it
+          passphrase = storedPassphrase
+          passphraseCache.set(defaultKeypair.id, passphrase)
+          console.log(colors.muted('Using passphrase from system keychain'))
+        } catch {
+          // Stored passphrase is invalid (key may have changed), prompt for new one
+          showWarning('Stored passphrase is invalid. Please enter your passphrase.')
+        }
+      }
 
-      // Validate the passphrase by attempting to decrypt the key
-      try {
-        await openpgp.decryptKey({
-          privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key, config: weakKeyConfig }),
-          passphrase,
-        })
-        // If successful, cache the passphrase
-        passphraseCache.set(defaultKeypair.id, passphrase)
-      } catch (error) {
-        throw new Error('Incorrect passphrase')
+      // If we still don't have a valid passphrase, prompt for it
+      if (!passphrase) {
+        const { passphraseInput } = await escapeablePrompt([
+          {
+            type: 'password',
+            name: 'passphraseInput',
+            message: promptMessage('Enter your private key passphrase:'),
+            mask: '*',
+          },
+        ])
+        passphrase = passphraseInput
+
+        // Validate the passphrase by attempting to decrypt the key
+        try {
+          await openpgp.decryptKey({
+            privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key, config: weakKeyConfig }),
+            passphrase,
+            config: weakKeyConfig,
+          })
+          // If successful, cache the passphrase in session
+          passphraseCache.set(defaultKeypair.id, passphrase)
+
+          // Ask if user wants to save passphrase to system keychain
+          const alreadyStored = await hasStoredPassphrase(defaultKeypair.fingerprint)
+          if (!alreadyStored) {
+            const { saveToKeychain } = await escapeablePrompt([
+              {
+                type: 'confirm',
+                name: 'saveToKeychain',
+                message: promptMessage('Save passphrase to system keychain?'),
+                default: false,
+              },
+            ])
+
+            if (saveToKeychain) {
+              const saved = await storePassphrase(defaultKeypair.fingerprint, passphrase)
+              if (saved) {
+                showSuccess('Passphrase saved to system keychain')
+              } else {
+                showWarning('Could not save to keychain (may not be available on this system)')
+              }
+            }
+          }
+        } catch (error) {
+          throw new Error('Incorrect passphrase')
+        }
       }
     }
   }
@@ -97,6 +173,7 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
   const privateKey = await openpgp.decryptKey({
     privateKey: await openpgp.readPrivateKey({ armoredKey: defaultKeypair.private_key, config: weakKeyConfig }),
     passphrase,
+    config: weakKeyConfig,
   })
 
   const message = await openpgp.readMessage({
@@ -106,6 +183,7 @@ async function decryptMessage(encryptedMessage: string): Promise<string> {
   const { data: decrypted } = await openpgp.decrypt({
     message,
     decryptionKeys: privateKey,
+    config: weakKeyConfig,
   })
 
   // Update last_used_at
@@ -152,12 +230,11 @@ function detectAvailableEditors(): EditorChoice[] {
 }
 
 async function readInlineMultilineInput(promptText: string): Promise<string> {
-  console.log(chalk.yellow(promptText))
-  console.log(
-    chalk.gray('(Type your message. Press Enter, then Ctrl+D to finish)\n')
-  )
+  console.log(promptMessage(promptText))
+  console.log(colors.muted('(Type your message. Press Enter, then Ctrl+D to finish)\n'))
 
   const rl = readline.createInterface({ input, output })
+  rl.setPrompt('')
   const lines: string[] = []
 
   return new Promise((resolve) => {
@@ -187,13 +264,13 @@ async function addKeysFromClipboard(recipients: Recipient[]): Promise<number> {
   try {
     clipboardContent = await clipboardy.read()
   } catch {
-    console.log(chalk.yellow('Could not access clipboard'))
+    showWarning('Could not access clipboard')
     return 0
   }
 
   const keys = extractAllPublicKeys(clipboardContent)
   if (keys.length === 0) {
-    console.log(chalk.yellow('No public keys found in clipboard'))
+    showWarning('No public keys found in clipboard')
     return 0
   }
 
@@ -208,7 +285,7 @@ async function addKeysFromClipboard(recipients: Recipient[]): Promise<number> {
       // Check for duplicates
       const isDuplicate = recipients.some((r) => r.publicKey === publicKey)
       if (isDuplicate) {
-        console.log(chalk.yellow(`⚠ Skipping duplicate key: ${recipientName}`))
+        showWarning(`Skipping duplicate key: ${recipientName}`)
         continue
       }
 
@@ -216,10 +293,10 @@ async function addKeysFromClipboard(recipients: Recipient[]): Promise<number> {
         name: recipientName,
         publicKey,
       })
-      console.log(chalk.green(`✓ Added recipient: ${recipientName}`))
+      showSuccess(`Added recipient: ${recipientName}`)
       addedCount++
     } catch (error) {
-      console.log(chalk.red(`✗ Failed to parse a key: ${error instanceof Error ? error.message : 'unknown error'}`))
+      showError(`Failed to parse a key: ${error instanceof Error ? error.message : 'unknown error'}`)
     }
   }
 
@@ -238,7 +315,7 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
     // Show current recipients count
     if (recipients.length > 0) {
       choices.push({
-        name: chalk.cyan(`── Current recipients: ${recipients.length} ──`),
+        name: colors.primary(`── Current recipients: ${recipients.length} ──`),
         value: 'show-recipients',
       })
     }
@@ -247,7 +324,7 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
     const selfAdded = recipients.some((r) => r.name === 'Myself')
     if (defaultKeypair && !selfAdded) {
       choices.push({
-        name: '🔑 Add myself (so I can also decrypt)',
+        name: `${icons.key} Add myself ${colors.muted('(so I can also decrypt)')}`,
         value: 'self',
       })
     }
@@ -255,24 +332,24 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
     // Option to select from contacts
     if (contacts.length > 0) {
       choices.push({
-        name: `👥 Select from saved contacts (${contacts.length} available)`,
+        name: `${icons.contact} Select from saved contacts ${colors.muted(`(${contacts.length} available)`)}`,
         value: 'contacts',
       })
     }
 
     // Clipboard and manual options
     choices.push({
-      name: '📋 Paste from clipboard (supports multiple keys)',
+      name: `${icons.clipboard} Paste from clipboard ${colors.muted('(supports multiple keys)')}`,
       value: 'clipboard',
     })
     choices.push({
-      name: '⌨️  Type/paste a single key',
+      name: `${icons.inline} Type/paste a single key`,
       value: 'manual',
     })
 
     // Done or cancel
     choices.push({
-      name: recipients.length > 0 ? '✓ Done adding recipients' : '← Cancel',
+      name: recipients.length > 0 ? `${icons.success} Done adding recipients` : `${icons.back} Cancel`,
       value: 'done',
     })
 
@@ -281,11 +358,11 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
 
   let addMore = true
   while (addMore) {
-    const { addMethod } = await inquirer.prompt([
+    const { addMethod } = await escapeablePrompt([
       {
         type: 'list',
         name: 'addMethod',
-        message: chalk.yellow('Add recipients:'),
+        message: promptMessage('Add recipients:'),
         choices: buildChoices(),
       },
     ])
@@ -294,9 +371,9 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
       addMore = false
     } else if (addMethod === 'show-recipients') {
       // Show current recipients
-      console.log(chalk.cyan('\nCurrent recipients:'))
+      console.log(colors.primary('\nCurrent recipients:'))
       for (const r of recipients) {
-        console.log(chalk.gray(`   • ${r.name}`))
+        console.log(colors.muted(`   • ${r.name}`))
       }
       console.log()
     } else if (addMethod === 'self') {
@@ -305,19 +382,19 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
           name: 'Myself',
           publicKey: defaultKeypair.public_key,
         })
-        console.log(chalk.green('✓ Added yourself as a recipient'))
+        showSuccess('Added yourself as a recipient')
       }
     } else if (addMethod === 'contacts') {
       // Show contacts as a checkbox
-      const { selectedContacts } = await inquirer.prompt([
+      const { selectedContacts } = await escapeablePrompt([
         {
           type: 'checkbox',
           name: 'selectedContacts',
-          message: chalk.yellow('Select contacts (space to toggle, enter to confirm):'),
+          message: promptMessage('Select contacts (space to toggle, enter to confirm):'),
           choices: contacts.map((c) => {
             const alreadyAdded = recipients.some((r) => r.publicKey === c.public_key)
             return {
-              name: `${c.name} <${c.email || 'no email'}>${alreadyAdded ? chalk.gray(' (already added)') : ''}`,
+              name: `${c.name} <${c.email || 'no email'}>${alreadyAdded ? colors.muted(' (already added)') : ''}`,
               value: c.id,
               checked: false,
               disabled: alreadyAdded,
@@ -338,12 +415,14 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
         }
       }
       if (addedCount > 0) {
-        console.log(chalk.green(`✓ Added ${addedCount} contact${addedCount > 1 ? 's' : ''}`))
+        showSuccess(`Added ${addedCount} contact${addedCount > 1 ? 's' : ''}`)
       }
     } else if (addMethod === 'clipboard') {
       const added = await addKeysFromClipboard(recipients)
       if (added > 0) {
-        console.log(chalk.green(`\n✓ Added ${added} recipient${added > 1 ? 's' : ''} from clipboard\n`))
+        console.log()
+        showSuccess(`Added ${added} recipient${added > 1 ? 's' : ''} from clipboard`)
+        console.log()
       }
     } else if (addMethod === 'manual') {
       const publicKey = await getRecipientPublicKey()
@@ -355,16 +434,16 @@ async function selectMultipleRecipients(): Promise<Recipient[]> {
           // Check for duplicates
           const isDuplicate = recipients.some((r) => r.publicKey === publicKey)
           if (isDuplicate) {
-            console.log(chalk.yellow(`⚠ This recipient is already in the list`))
+            showWarning('This recipient is already in the list')
           } else {
             recipients.push({
               name: recipientName,
               publicKey,
             })
-            console.log(chalk.green(`✓ Added recipient: ${recipientName}`))
+            showSuccess(`Added recipient: ${recipientName}`)
           }
         } catch (error) {
-          console.log(chalk.red('Failed to parse public key'))
+          showError('Failed to parse public key')
         }
       }
     }
@@ -389,7 +468,7 @@ async function getRecipientPublicKey(): Promise<string | null> {
 
   // If public key found in clipboard, ask if user wants to use it
   if (hasPublicKeyInClipboard) {
-    const { useClipboard } = await inquirer.prompt([
+    const { useClipboard } = await escapeablePrompt([
       {
         type: 'confirm',
         name: 'useClipboard',
@@ -408,10 +487,11 @@ async function getRecipientPublicKey(): Promise<string | null> {
 
   // If no key from clipboard, prompt for input
   if (!publicKey) {
-    console.log(chalk.yellow('\nPaste the recipient\'s PGP PUBLIC key:'))
-    console.log(chalk.gray('(Press Enter to finish, or press Enter then Ctrl+D)\n'))
+    console.log(promptMessage('\nPaste the recipient\'s PGP PUBLIC key:'))
+    console.log(colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)\n'))
 
     const rl = readline.createInterface({ input, output })
+    rl.setPrompt('')
     const lines: string[] = []
 
     publicKey = await new Promise((resolve) => {
@@ -436,26 +516,39 @@ async function getRecipientPublicKey(): Promise<string | null> {
 
   // Validate public key format
   if (!publicKey.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
-    console.log(chalk.red('\n❌ Invalid public key format\n'))
+    console.log()
+    showError('Invalid public key format')
+    console.log()
     return null
   }
 
   // Try to read the key to validate it
   try {
     await openpgp.readKey({ armoredKey: publicKey, config: weakKeyConfig })
-    console.log(chalk.green('\n✓ Valid public key\n'))
+    console.log()
+    showSuccess('Valid public key')
+    console.log()
     return publicKey
   } catch (error) {
-    console.log(chalk.red('\n❌ Failed to read public key:', error instanceof Error ? error.message : error))
+    console.log()
+    showError(`Failed to read public key: ${error instanceof Error ? error.message : error}`)
     return null
   }
 }
 
-function printBanner() {
-  console.clear()
-  console.log(chalk.cyan.bold('\n╔════════════════════════════════════════╗'))
-  console.log(chalk.cyan.bold('║      🔐  Layerbase PGP Tool           ║'))
-  console.log(chalk.cyan.bold('╚════════════════════════════════════════╝\n'))
+// printBanner is imported from ui.ts
+
+function getEditorInstructions(editorCommand: string): string {
+  const instructions: Record<string, string> = {
+    'nano': 'Save: Ctrl+O, then Enter. Exit: Ctrl+X',
+    'vim': 'Save and exit: :wq  |  Cancel: :q!',
+    'nvim': 'Save and exit: :wq  |  Cancel: :q!',
+    'code': 'Save: Cmd/Ctrl+S, then close the editor tab',
+    'emacs': 'Save: Ctrl+X Ctrl+S  |  Exit: Ctrl+X Ctrl+C',
+    'open -e': 'Save: Cmd+S, then close the window',
+    'notepad': 'Save: Ctrl+S, then close the window',
+  }
+  return instructions[editorCommand] || 'Save and close the editor when done'
 }
 
 function clearPassphraseCache() {
@@ -469,33 +562,26 @@ async function main() {
   // Check for default keypair on first run
   const hasKeypair = await keyManager.hasDefaultKeypair()
   if (!hasKeypair) {
-    console.log(chalk.yellow('\n⚠️  No keypair found. Let\'s set up your first keypair.\n'))
+    console.log()
+    showWarning('No keypair found. Let\'s set up your first keypair.')
+    console.log()
     await keyManager.setupFirstKeypair()
-    console.log(chalk.green('\n✅ Setup complete! You can now use the tool.\n'))
+    console.log()
+    showSuccess('Setup complete! You can now use the tool.')
+    console.log()
   }
 
-  const { action } = await inquirer.prompt([
+  const { action } = await escapeablePrompt([
     {
       type: 'list',
       name: 'action',
-      message: chalk.yellow('What would you like to do?'),
+      message: promptMessage('What would you like to do?'),
       choices: [
-        {
-          name: '🔒 Encrypt a message',
-          value: 'encrypt',
-        },
-        {
-          name: '🔓 Decrypt a message',
-          value: 'decrypt',
-        },
-        {
-          name: '🔑 Manage keys',
-          value: 'keys',
-        },
-        {
-          name: '👋 Exit',
-          value: 'exit',
-        },
+        { name: `${icons.encrypt} Encrypt a message`, value: 'encrypt' },
+        { name: `${icons.decrypt} Decrypt a message`, value: 'decrypt' },
+        { name: `${icons.key} Manage keys`, value: 'keys' },
+        new inquirer.Separator(),
+        exitChoice(),
       ],
     },
   ])
@@ -514,37 +600,24 @@ async function main() {
   if (action === 'encrypt') {
     try {
       // Ask who to encrypt for
-      const { recipient } = await inquirer.prompt([
+      const { recipient } = await escapeablePrompt([
         {
           type: 'list',
           name: 'recipient',
-          message: chalk.yellow('Who do you want to encrypt this message for?'),
+          message: promptMessage('Who do you want to encrypt this message for?'),
           choices: [
-            {
-              name: '🔑 Myself (use my public key)',
-              value: 'self',
-            },
-            {
-              name: '👤 Someone else (use their public key)',
-              value: 'other',
-            },
-            {
-              name: '👥 Multiple recipients',
-              value: 'multiple',
-            },
-            {
-              name: '← Back to main menu',
-              value: 'back',
-            },
+            { name: `${icons.contact} Someone else ${colors.muted('(use their public key)')}`, value: 'other' },
+            { name: `${icons.multiple} Multiple recipients`, value: 'multiple' },
+            { name: `${icons.key} Myself ${colors.muted('(use my public key)')}`, value: 'self' },
+            new inquirer.Separator(),
+            mainMenuChoice(),
           ],
         },
       ])
 
-      if (recipient === 'back') {
+      if (recipient === 'back' || recipient === 'main-menu') {
         return main()
       }
-
-      // Note: No 'main-menu' option here since 'back' already goes to main menu
 
       let recipientPublicKeys: string[] = []
       let recipientNames: string[] = []
@@ -554,237 +627,276 @@ async function main() {
       if (recipient === 'multiple') {
         const recipients = await selectMultipleRecipients()
         if (recipients.length === 0) {
-          console.log(chalk.red('\n❌ No recipients selected. Aborting.\n'))
+          console.log()
+          showError('No recipients selected. Aborting.')
+          console.log()
           return main()
         }
         recipientPublicKeys = recipients.map((r) => r.publicKey)
         recipientNames = recipients.map((r) => r.name)
 
         // Show summary
-        console.log(chalk.cyan('\n📬 Encrypting for the following recipients:'))
+        console.log(colors.primary('\nEncrypting for the following recipients:'))
         for (const name of recipientNames) {
-          console.log(chalk.gray(`   • ${name}`))
+          console.log(colors.muted(`   • ${name}`))
         }
         console.log()
       } else if (recipient === 'other') {
         // Check if there are any saved contacts
         const contacts = db.select({ table: 'contact' })
 
-        if (contacts.length > 0) {
-          // Offer saved contacts or new key
-          const contactChoices: Array<{ name: string; value: number | string }> = contacts.map((c) => ({
-            name: `${c.name} <${c.email}>`,
-            value: c.id,
-          }))
-          contactChoices.push(
-            { name: '➕ Use a new public key', value: 'new' },
-            { name: '← Back', value: 'back' },
-            { name: '🏠 Main menu', value: 'main-menu' }
+        // Loop for recipient selection (allows going back from contacts submenu)
+        recipientLoop: while (true) {
+          // Build main menu choices
+          const recipientChoices: any[] = []
+
+          if (contacts.length > 0) {
+            recipientChoices.push({
+              name: `${icons.contact} Saved contacts ${colors.muted(`(${contacts.length} available)`)}`,
+              value: 'saved-contacts',
+            })
+          }
+
+          recipientChoices.push(
+            { name: `${icons.add} Use a new public key`, value: 'new' },
+            new inquirer.Separator(),
+            mainMenuChoice()
           )
 
-          const { contactChoice } = await inquirer.prompt([
+          const { recipientSource } = await escapeablePrompt([
             {
               type: 'list',
-              name: 'contactChoice',
-              message: chalk.yellow('Select a contact or enter a new key:'),
-              choices: contactChoices,
+              name: 'recipientSource',
+              message: promptMessage('How would you like to specify the recipient?'),
+              choices: recipientChoices,
             },
           ])
 
-          if (contactChoice === 'back') {
-            // Go back to recipient selection - re-run encrypt flow
+          if (recipientSource === 'main' || recipientSource === 'main-menu') {
             return main()
           }
 
-          if (contactChoice === 'main-menu') {
-            return main()
-          }
+          if (recipientSource === 'saved-contacts') {
+            // Show contacts submenu
+            const contactChoices: any[] = contacts.map((c) => ({
+              name: `${icons.contact} ${c.name} ${colors.muted(`<${c.email}>`)}`,
+              value: c.id,
+            }))
+            contactChoices.push(
+              new inquirer.Separator(),
+              backChoice(),
+              mainMenuChoice(),
+              new inquirer.Separator()
+            )
 
-          if (contactChoice === 'new') {
-            const publicKey = await getRecipientPublicKey()
-            if (!publicKey) {
-              console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
+            const { contactChoice } = await escapeablePrompt([
+              {
+                type: 'list',
+                name: 'contactChoice',
+                message: promptMessage('Select a contact:'),
+                choices: contactChoices,
+              },
+            ])
+
+            if (contactChoice === 'main' || contactChoice === 'main-menu') {
               return main()
             }
-            recipientPublicKeys = [publicKey]
-            isNewContact = true
-          } else {
+
+            if (contactChoice === 'back') {
+              // Go back to recipient source selection
+              continue recipientLoop
+            }
+
             // Use saved contact
             const selectedContact = contacts.find((c) => c.id === contactChoice)
             if (selectedContact) {
               recipientPublicKeys = [selectedContact.public_key]
+              break recipientLoop
             }
+          } else if (recipientSource === 'new') {
+            const publicKey = await getRecipientPublicKey()
+            if (!publicKey) {
+              console.log()
+              showError('Could not get recipient public key. Aborting.')
+              console.log()
+              return main()
+            }
+            recipientPublicKeys = [publicKey]
+            isNewContact = true
+            break recipientLoop
           }
-        } else {
-          // No saved contacts, get new key
-          const publicKey = await getRecipientPublicKey()
-          if (!publicKey) {
-            console.log(chalk.red('\n❌ Could not get recipient public key. Aborting.\n'))
-            return main()
-          }
-          recipientPublicKeys = [publicKey]
-          isNewContact = true
         }
       }
 
       // Detect available editors
       const availableEditors = detectAvailableEditors()
 
-      // Ask for input method
-      const inputChoices: any[] = []
+      let message: string | undefined
 
-      // Always add clipboard option first
-      inputChoices.push({
-        name: '📋 Paste from clipboard',
-        value: 'clipboard',
-      })
+      // Loop for input method selection (allows going back from editor selection)
+      inputMethodLoop: while (true) {
+        // Ask for input method
+        const inputChoices: any[] = []
 
-      if (availableEditors.length > 0) {
-        inputChoices.push(
-          {
-            name: '📝 Use an editor',
-            value: 'editor',
-          },
-          {
-            name: '⌨️  Type inline (Enter, then Ctrl+D to finish)',
-            value: 'inline',
-          }
-        )
-      } else {
+        // Always add clipboard option first
         inputChoices.push({
-          name: '⌨️  Type inline (Enter, then Ctrl+D to finish)',
-          value: 'inline',
+          name: `${icons.clipboard} Paste from clipboard`,
+          value: 'clipboard',
         })
-      }
 
-      // Add back option
-      inputChoices.push({
-        name: '← Back',
-        value: 'back',
-      })
-
-      // Add main menu option
-      inputChoices.push({
-        name: '🏠 Main menu',
-        value: 'main-menu',
-      })
-
-      const { inputMethod } = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'inputMethod',
-          message: chalk.yellow('How would you like to enter your message?'),
-          choices: inputChoices,
-        },
-      ])
-
-      if (inputMethod === 'back') {
-        // Go back to recipient selection
-        return main()
-      }
-
-      if (inputMethod === 'main-menu') {
-        return main()
-      }
-
-      let message: string
-
-      if (inputMethod === 'clipboard') {
-        try {
-          message = await clipboardy.read()
-          if (!message || message.trim() === '') {
-            console.log(chalk.red('\n❌ Clipboard is empty.\n'))
-            return main()
-          }
-          console.log(chalk.green('\n✓ Message loaded from clipboard\n'))
-        } catch (clipError) {
-          console.log(
-            chalk.red('\n❌ Failed to read from clipboard:', clipError)
+        if (availableEditors.length > 0) {
+          inputChoices.push(
+            { name: `${icons.editor} Use an editor`, value: 'editor' },
+            { name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`, value: 'inline' }
           )
-          return main()
+        } else {
+          inputChoices.push({
+            name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`,
+            value: 'inline',
+          })
         }
-      } else if (inputMethod === 'editor') {
-        // Let user choose editor
-        const { selectedEditor } = await inquirer.prompt([
+
+        // Add main menu option
+        inputChoices.push(new inquirer.Separator(), mainMenuChoice())
+
+        const { inputMethod } = await escapeablePrompt([
           {
             type: 'list',
-            name: 'selectedEditor',
-            message: chalk.yellow('Choose your editor:'),
-            choices: availableEditors.map((e) => ({
-              name: e.name,
-              value: e.command,
-            })),
+            name: 'inputMethod',
+            message: promptMessage('How would you like to enter your message?'),
+            choices: inputChoices,
           },
         ])
 
-        // Set the EDITOR environment variable before opening inquirer editor
-        const originalEditor = process.env.EDITOR
-        const originalVisual = process.env.VISUAL
-        process.env.EDITOR = selectedEditor
-        process.env.VISUAL = selectedEditor
+        if (inputMethod === 'back' || inputMethod === 'main-menu') {
+          return main()
+        }
 
-        try {
-          const { editorInput } = await inquirer.prompt([
+        if (inputMethod === 'clipboard') {
+          try {
+            message = await clipboardy.read()
+            if (!message || message.trim() === '') {
+              console.log()
+              showError('Clipboard is empty.')
+              console.log()
+              return main()
+            }
+            console.log()
+            showSuccess('Message loaded from clipboard')
+            console.log()
+            break inputMethodLoop
+          } catch (clipError) {
+            console.log()
+            showError(`Failed to read from clipboard: ${clipError}`)
+            return main()
+          }
+        } else if (inputMethod === 'editor') {
+          // Let user choose editor
+          const editorChoices: any[] = availableEditors.map((e) => ({
+            name: `${icons.editor} ${e.name} ${colors.muted(`(${getEditorInstructions(e.command)})`)}`,
+            value: e.command,
+          }))
+          editorChoices.push(new inquirer.Separator(), backChoice(), mainMenuChoice())
+
+          const { selectedEditor } = await escapeablePrompt([
             {
-              type: 'editor',
-              name: 'editorInput',
-              message: chalk.yellow(
-                `Press Enter to open ${availableEditors.find((e) => e.command === selectedEditor)?.name}:`
-              ),
-              postfix: '.txt',
-              waitForUseInput: false,
+              type: 'list',
+              name: 'selectedEditor',
+              message: promptMessage('Choose your editor:'),
+              choices: editorChoices,
             },
           ])
 
-          message = editorInput
-        } finally {
-          // Restore original environment variables
-          if (originalEditor !== undefined) {
-            process.env.EDITOR = originalEditor
-          } else {
-            delete process.env.EDITOR
+          if (selectedEditor === 'back') {
+            // Re-ask for input method
+            continue inputMethodLoop
           }
-          if (originalVisual !== undefined) {
-            process.env.VISUAL = originalVisual
-          } else {
-            delete process.env.VISUAL
+          if (selectedEditor === 'main-menu') {
+            return main()
           }
+
+          // Set the EDITOR environment variable before opening inquirer editor
+          const originalEditor = process.env.EDITOR
+          const originalVisual = process.env.VISUAL
+          process.env.EDITOR = selectedEditor
+          process.env.VISUAL = selectedEditor
+          const editorName = availableEditors.find((e) => e.command === selectedEditor)?.name || 'editor'
+
+          console.log(colors.muted('\nNote: The temp file is automatically deleted after encryption.\n'))
+
+          try {
+            const { editorInput } = await escapeablePrompt([
+              {
+                type: 'editor',
+                name: 'editorInput',
+                message: promptMessage(`Press Enter to open ${editorName}:`),
+                postfix: '.txt',
+                waitForUseInput: false,
+              },
+            ])
+
+            message = editorInput
+            break inputMethodLoop
+          } finally {
+            // Restore original environment variables
+            if (originalEditor !== undefined) {
+              process.env.EDITOR = originalEditor
+            } else {
+              delete process.env.EDITOR
+            }
+            if (originalVisual !== undefined) {
+              process.env.VISUAL = originalVisual
+            } else {
+              delete process.env.VISUAL
+            }
+          }
+        } else {
+          message = await readInlineMultilineInput('Enter your message:')
+          break inputMethodLoop
         }
-      } else {
-        message = await readInlineMultilineInput('Enter your message:')
       }
 
       if (!message || message.trim() === '') {
-        console.log(chalk.red('\n❌ No message provided. Aborting.\n'))
+        console.log()
+        showError('No message provided. Aborting.')
+        console.log()
         return main()
       }
 
-      console.log(chalk.blue('\n⏳ Encrypting message...\n'))
+      console.log()
+      showLoading('Encrypting message...')
+      console.log()
       const encrypted = await encryptMessage(message, recipientPublicKeys.length > 0 ? recipientPublicKeys : undefined)
 
-      console.log(chalk.green.bold('✅ Encrypted Message:\n'))
-      console.log(chalk.gray('─'.repeat(50)))
-      console.log(chalk.white(encrypted))
-      console.log(chalk.gray('─'.repeat(50)))
+      // Clear screen, show encrypted message, then clipboard status
+      console.clear()
+      printBanner()
 
-      // Copy to clipboard
+      console.log(colors.successBold('Encrypted Message:\n'))
+      printDivider()
+      console.log(encrypted)
+      printDivider()
+
+      // Copy to clipboard and show status below the message
       try {
         await clipboardy.write(encrypted)
-        console.log(chalk.green('\n📋 Copied to clipboard!\n'))
+        console.log()
+        showSuccess('Encrypted message copied to clipboard')
+        console.log()
       } catch (clipError) {
-        console.log(
-          chalk.yellow('\n⚠️  Could not copy to clipboard automatically\n')
-        )
+        console.log()
+        showWarning('Clipboard unavailable')
+        console.log()
       }
 
       // Offer to save the contact if it's a new public key (single recipient only)
       const newPublicKey = recipientPublicKeys[0]
       if (isNewContact && newPublicKey !== undefined && recipientPublicKeys.length === 1) {
-        const { saveContact } = await inquirer.prompt([
+        const { saveContact } = await escapeablePrompt([
           {
             type: 'confirm',
             name: 'saveContact',
-            message: chalk.yellow('Would you like to save this contact for future use?'),
+            message: promptMessage('Would you like to save this contact for future use?'),
             default: true,
           },
         ])
@@ -796,11 +908,11 @@ async function main() {
 
             // Prompt for contact name
             const defaultName = (keyInfo.email || 'unknown').split('@')[0] || 'Contact'
-            const answers = await inquirer.prompt([
+            const answers = await escapeablePrompt([
               {
                 type: 'input',
                 name: 'contactName',
-                message: 'Contact name:',
+                message: promptMessage('Contact name:'),
                 default: defaultName,
                 validate: (input: string) => input.trim().length > 0 || 'Name cannot be empty',
               },
@@ -814,7 +926,9 @@ async function main() {
             })
 
             if (existingContacts.length > 0) {
-              console.log(chalk.yellow('\n⚠️  This contact already exists.\n'))
+              console.log()
+              showWarning('This contact already exists.')
+              console.log()
             } else {
               // Save the contact
               db.insert('contact', {
@@ -831,208 +945,212 @@ async function main() {
                 revoked: false,
               })
 
-              console.log(chalk.green(`\n✓ Contact "${contactName}" saved successfully!\n`))
+              console.log()
+              showSuccess(`Contact "${contactName}" saved successfully!`)
+              console.log()
             }
           } catch (error) {
-            console.log(
-              chalk.red('\n❌ Failed to save contact:'),
-              error instanceof Error ? error.message : error
-            )
+            console.log()
+            showError(`Failed to save contact: ${error instanceof Error ? error.message : error}`)
           }
         }
       }
     } catch (error) {
-      console.log(
-        chalk.red(
-          '\n❌ Encryption failed:',
-          error instanceof Error ? error.message : error
-        )
-      )
+      // Re-throw escape errors to be handled by the main loop
+      if (error instanceof EscapeError) throw error
+      console.log()
+      showError(`Encryption failed: ${error instanceof Error ? error.message : error}`)
     }
   } else if (action === 'decrypt') {
     try {
       // Detect available editors
       const availableEditors = detectAvailableEditors()
 
-      // Ask for input method
-      const inputChoices: any[] = []
+      let encrypted: string | undefined
 
-      // Always add clipboard option first
-      inputChoices.push({
-        name: '📋 Paste from clipboard',
-        value: 'clipboard',
-      })
+      // Loop for input method selection (allows going back from editor selection)
+      decryptInputLoop: while (true) {
+        // Ask for input method
+        const inputChoices: any[] = []
 
-      if (availableEditors.length > 0) {
-        inputChoices.push(
-          {
-            name: '📝 Use an editor',
-            value: 'editor',
-          },
-          {
-            name: '⌨️  Type inline (Enter, then Ctrl+D to finish)',
-            value: 'inline',
-          }
-        )
-      } else {
+        // Always add clipboard option first
         inputChoices.push({
-          name: '⌨️  Type inline (Enter, then Ctrl+D to finish)',
-          value: 'inline',
+          name: `${icons.clipboard} Paste from clipboard`,
+          value: 'clipboard',
         })
-      }
 
-      // Add back option (for decrypt, back goes to main menu since there's no prior submenu)
-      inputChoices.push({
-        name: '← Back to main menu',
-        value: 'back',
-      })
-
-      // Add main menu option
-      inputChoices.push({
-        name: '🏠 Main menu',
-        value: 'main-menu',
-      })
-
-      const { inputMethod } = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'inputMethod',
-          message: chalk.yellow(
-            'How would you like to enter the encrypted message?'
-          ),
-          choices: inputChoices,
-        },
-      ])
-
-      if (inputMethod === 'back' || inputMethod === 'main-menu') {
-        return main()
-      }
-
-      let encrypted: string
-
-      if (inputMethod === 'clipboard') {
-        try {
-          encrypted = await clipboardy.read()
-          if (!encrypted || encrypted.trim() === '') {
-            console.log(chalk.red('\n❌ Clipboard is empty.\n'))
-            return main()
-          }
-          console.log(chalk.green('\n✓ Encrypted message loaded from clipboard\n'))
-        } catch (clipError) {
-          console.log(
-            chalk.red('\n❌ Failed to read from clipboard:', clipError)
+        if (availableEditors.length > 0) {
+          inputChoices.push(
+            { name: `${icons.editor} Use an editor`, value: 'editor' },
+            { name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`, value: 'inline' }
           )
-          return main()
+        } else {
+          inputChoices.push({
+            name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`,
+            value: 'inline',
+          })
         }
-      } else if (inputMethod === 'editor') {
-        // Let user choose editor
-        const { selectedEditor } = await inquirer.prompt([
+
+        // Add main menu option
+        inputChoices.push(new inquirer.Separator(), mainMenuChoice())
+
+        const { inputMethod } = await escapeablePrompt([
           {
             type: 'list',
-            name: 'selectedEditor',
-            message: chalk.yellow('Choose your editor:'),
-            choices: availableEditors.map((e) => ({
-              name: e.name,
-              value: e.command,
-            })),
+            name: 'inputMethod',
+            message: promptMessage('How would you like to enter the encrypted message?'),
+            choices: inputChoices,
           },
         ])
 
-        // Set the EDITOR environment variable before opening inquirer editor
-        const originalEditor = process.env.EDITOR
-        const originalVisual = process.env.VISUAL
-        process.env.EDITOR = selectedEditor
-        process.env.VISUAL = selectedEditor
+        if (inputMethod === 'back' || inputMethod === 'main-menu') {
+          return main()
+        }
 
-        try {
-          const { editorInput } = await inquirer.prompt([
+        if (inputMethod === 'clipboard') {
+          try {
+            encrypted = await clipboardy.read()
+            if (!encrypted || encrypted.trim() === '') {
+              console.log()
+              showError('Clipboard is empty.')
+              console.log()
+              return main()
+            }
+            console.log()
+            showSuccess('Encrypted message loaded from clipboard')
+            console.log()
+            break decryptInputLoop
+          } catch (clipError) {
+            console.log()
+            showError(`Failed to read from clipboard: ${clipError}`)
+            return main()
+          }
+        } else if (inputMethod === 'editor') {
+          // Let user choose editor
+          const editorChoices: any[] = availableEditors.map((e) => ({
+            name: `${icons.editor} ${e.name} ${colors.muted(`(${getEditorInstructions(e.command)})`)}`,
+            value: e.command,
+          }))
+          editorChoices.push(new inquirer.Separator(), backChoice(), mainMenuChoice())
+
+          const { selectedEditor } = await escapeablePrompt([
             {
-              type: 'editor',
-              name: 'editorInput',
-              message: chalk.yellow(
-                `Press Enter to open ${availableEditors.find((e) => e.command === selectedEditor)?.name}:`
-              ),
-              postfix: '.txt',
-              waitForUseInput: false,
+              type: 'list',
+              name: 'selectedEditor',
+              message: promptMessage('Choose your editor:'),
+              choices: editorChoices,
             },
           ])
 
-          encrypted = editorInput
-        } finally {
-          // Restore original environment variables
-          if (originalEditor !== undefined) {
-            process.env.EDITOR = originalEditor
-          } else {
-            delete process.env.EDITOR
+          if (selectedEditor === 'back') {
+            // Re-ask for input method
+            continue decryptInputLoop
           }
-          if (originalVisual !== undefined) {
-            process.env.VISUAL = originalVisual
-          } else {
-            delete process.env.VISUAL
+          if (selectedEditor === 'main-menu') {
+            return main()
           }
+
+          // Set the EDITOR environment variable before opening inquirer editor
+          const originalEditor = process.env.EDITOR
+          const originalVisual = process.env.VISUAL
+          process.env.EDITOR = selectedEditor
+          process.env.VISUAL = selectedEditor
+          const editorName = availableEditors.find((e) => e.command === selectedEditor)?.name || 'editor'
+
+          console.log(colors.muted('\nNote: The temp file is automatically deleted after decryption.\n'))
+
+          try {
+            const { editorInput } = await escapeablePrompt([
+              {
+                type: 'editor',
+                name: 'editorInput',
+                message: promptMessage(`Press Enter to open ${editorName}:`),
+                postfix: '.txt',
+                waitForUseInput: false,
+              },
+            ])
+
+            encrypted = editorInput
+            break decryptInputLoop
+          } finally {
+            // Restore original environment variables
+            if (originalEditor !== undefined) {
+              process.env.EDITOR = originalEditor
+            } else {
+              delete process.env.EDITOR
+            }
+            if (originalVisual !== undefined) {
+              process.env.VISUAL = originalVisual
+            } else {
+              delete process.env.VISUAL
+            }
+          }
+        } else {
+          encrypted = await readInlineMultilineInput(
+            'Paste the encrypted message:'
+          )
+          break decryptInputLoop
         }
-      } else {
-        encrypted = await readInlineMultilineInput(
-          'Paste the encrypted message:'
-        )
       }
 
       if (!encrypted || encrypted.trim() === '') {
-        console.log(chalk.red('\n❌ No encrypted message provided. Aborting.\n'))
+        console.log()
+        showError('No encrypted message provided. Aborting.')
+        console.log()
         return main()
       }
 
-      console.log(chalk.blue('\n⏳ Decrypting message...\n'))
+      console.log()
+      showLoading('Decrypting message...')
+      console.log()
       const decrypted = await decryptMessage(encrypted)
 
-      console.log(chalk.green.bold('✅ Decrypted Message:\n'))
-      console.log(chalk.gray('─'.repeat(50)))
-      console.log(chalk.white(decrypted))
-      console.log(chalk.gray('─'.repeat(50)))
+      // Clear screen, show decrypted message, then clipboard status
+      console.clear()
+      printBanner()
 
-      // Copy to clipboard
+      console.log(colors.successBold('Decrypted Message:\n'))
+      printDivider()
+      console.log(decrypted)
+      printDivider()
+
+      // Copy to clipboard and show status below the message
       try {
         await clipboardy.write(decrypted)
-        console.log(chalk.green('\n📋 Copied to clipboard!\n'))
+        console.log()
+        showSuccess('Decrypted message copied to clipboard')
+        console.log()
       } catch (clipError) {
-        console.log(
-          chalk.yellow('\n⚠️  Could not copy to clipboard automatically\n')
-        )
+        console.log()
+        showWarning('Clipboard unavailable')
+        console.log()
       }
 
       // Wait for user to press Enter before continuing
-      await inquirer.prompt([
+      await escapeablePrompt([
         {
           type: 'input',
           name: 'continue',
-          message: chalk.cyan('Press Enter to continue...'),
+          message: colors.muted('Press Enter to continue...'),
         },
       ])
     } catch (error) {
-      console.log(
-        chalk.red(
-          '\n❌ Decryption failed:',
-          error instanceof Error ? error.message : error
-        )
-      )
+      // Re-throw escape errors to be handled by the main loop
+      if (error instanceof EscapeError) throw error
+      console.log()
+      showError(`Decryption failed: ${error instanceof Error ? error.message : error}`)
     }
   }
 
   // Ask if user wants to continue
-  const { nextAction } = await inquirer.prompt([
+  const { nextAction } = await escapeablePrompt([
     {
       type: 'list',
       name: 'nextAction',
-      message: chalk.yellow('What would you like to do next?'),
+      message: promptMessage('What would you like to do next?'),
       choices: [
-        {
-          name: '🔄 Perform another operation',
-          value: 'continue',
-        },
-        {
-          name: '👋 Exit',
-          value: 'exit',
-        },
+        { name: `${icons.loop} Perform another operation`, value: 'continue' },
+        exitChoice(),
       ],
     },
   ])
@@ -1052,16 +1170,39 @@ process.on('SIGINT', () => {
   process.exit(0)
 })
 
-main().catch((error) => {
-  // Handle Ctrl+C gracefully (inquirer throws ExitPromptError)
-  if (error.message && error.message.includes('force closed the prompt')) {
-    clearPassphraseCache()
-    console.clear()
-    process.exit(0)
-  }
+// Enable global escape key handling and run menu in a loop
+enableGlobalEscape()
 
-  clearPassphraseCache()
-  console.clear()
-  console.error(chalk.red('\n❌ Error:'), error.message || error)
-  process.exit(1)
-})
+async function runApp() {
+  while (true) {
+    try {
+      await main()
+    } catch (error) {
+      const e = error as Error
+
+      // If escape was pressed, just restart the menu
+      if (
+        error instanceof EscapeError ||
+        checkAndResetEscape() ||
+        e.message?.includes('prompt was closed')
+      ) {
+        continue
+      }
+
+      // Handle Ctrl+C gracefully (inquirer throws ExitPromptError)
+      if (e.message?.includes('force closed the prompt')) {
+        clearPassphraseCache()
+        console.clear()
+        process.exit(0)
+      }
+
+      // Handle other errors
+      clearPassphraseCache()
+      console.clear()
+      showError(`Error: ${e.message || error}`)
+      process.exit(1)
+    }
+  }
+}
+
+runApp()
