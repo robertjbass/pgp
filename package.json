@@ -1,6 +1,6 @@
 {
   "name": "lpgp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Interactive CLI tool for PGP encryption/decryption with SQLite key management",
   "author": "Bob Bass",
   "license": "SEE LICENSE IN LICENSE",
