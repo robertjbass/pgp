@@ -82,13 +82,22 @@ export async function extractPublicKeyInfo(armoredKey: string): Promise<{
     // Key verification failed
   }
   const canSign = true // Assume true for generated keys
-  const canEncrypt = (await publicKey.getEncryptionKey(undefined, undefined, undefined, weakKeyConfig)) !== null
+  const canEncrypt =
+    (await publicKey.getEncryptionKey(
+      undefined,
+      undefined,
+      undefined,
+      weakKeyConfig
+    )) !== null
   const canCertify = true // Primary keys can typically certify
   const canAuthenticate = false // Not common for primary keys
 
   // Get expiration
   let expiresAt: string | null = null
-  const expirationTime = await publicKey.getExpirationTime(undefined, weakKeyConfig)
+  const expirationTime = await publicKey.getExpirationTime(
+    undefined,
+    weakKeyConfig
+  )
   if (expirationTime && expirationTime !== Infinity) {
     expiresAt = new Date(expirationTime).toISOString()
   }
@@ -126,7 +135,10 @@ export async function extractPrivateKeyInfo(
   canAuthenticate: boolean
   passphraseProtected: boolean
 }> {
-  let privateKey = await openpgp.readPrivateKey({ armoredKey, config: weakKeyConfig })
+  let privateKey = await openpgp.readPrivateKey({
+    armoredKey,
+    config: weakKeyConfig,
+  })
 
   // Check if passphrase protected
   const isEncrypted = privateKey.isDecrypted() === false
@@ -156,13 +168,22 @@ export async function extractPrivateKeyInfo(
     // Key verification failed
   }
   const canSign = true // Assume true for generated keys
-  const canEncrypt = (await privateKey.getEncryptionKey(undefined, undefined, undefined, weakKeyConfig)) !== null
+  const canEncrypt =
+    (await privateKey.getEncryptionKey(
+      undefined,
+      undefined,
+      undefined,
+      weakKeyConfig
+    )) !== null
   const canCertify = true
   const canAuthenticate = false
 
   // Get expiration
   let expiresAt: string | null = null
-  const expirationTime = await privateKey.getExpirationTime(undefined, weakKeyConfig)
+  const expirationTime = await privateKey.getExpirationTime(
+    undefined,
+    weakKeyConfig
+  )
   if (expirationTime && expirationTime !== Infinity) {
     expiresAt = new Date(expirationTime).toISOString()
   }
@@ -190,8 +211,14 @@ export async function verifyKeyPair(
   privateKeyArmored: string
 ): Promise<boolean> {
   try {
-    const publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored, config: weakKeyConfig })
-    const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored, config: weakKeyConfig })
+    const publicKey = await openpgp.readKey({
+      armoredKey: publicKeyArmored,
+      config: weakKeyConfig,
+    })
+    const privateKey = await openpgp.readPrivateKey({
+      armoredKey: privateKeyArmored,
+      config: weakKeyConfig,
+    })
 
     const publicFingerprint = publicKey.getFingerprint()
     const privateFingerprint = privateKey.getFingerprint()
@@ -210,7 +237,10 @@ export async function validatePassphrase(
   passphrase: string
 ): Promise<boolean> {
   try {
-    const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored, config: weakKeyConfig })
+    const privateKey = await openpgp.readPrivateKey({
+      armoredKey: privateKeyArmored,
+      config: weakKeyConfig,
+    })
 
     if (!privateKey.isDecrypted()) {
       await openpgp.decryptKey({
@@ -235,7 +265,9 @@ export function formatKeypairInfo(keypair: Keypair): string {
     `Email: ${obfuscateEmail(keypair.email)}`,
     `Fingerprint: ${keypair.fingerprint}`,
     `Algorithm: ${keypair.algorithm} (${keypair.key_size})`,
-    keypair.expires_at ? `Expires: ${new Date(keypair.expires_at).toLocaleDateString()}` : 'Expires: Never',
+    keypair.expires_at
+      ? `Expires: ${new Date(keypair.expires_at).toLocaleDateString()}`
+      : 'Expires: Never',
     `Capabilities: ${[
       keypair.can_sign && 'Sign',
       keypair.can_encrypt && 'Encrypt',

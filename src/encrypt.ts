@@ -8,8 +8,14 @@ const weakKeyConfig = {
   rejectCurves: new Set(),
 }
 
-export async function encryptMessage(message: string, publicKeyArmored: string): Promise<string> {
-  const publicKey = await openpgp.readKey({ armoredKey: publicKeyArmored, config: weakKeyConfig })
+export async function encryptMessage(
+  message: string,
+  publicKeyArmored: string
+): Promise<string> {
+  const publicKey = await openpgp.readKey({
+    armoredKey: publicKeyArmored,
+    config: weakKeyConfig,
+  })
 
   const encrypted = await openpgp.encrypt({
     message: await openpgp.createMessage({ text: message }),

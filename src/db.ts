@@ -1,5 +1,14 @@
-import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from 'sql.js'
-import { readFileSync, existsSync, mkdirSync, writeFileSync, copyFileSync } from 'fs'
+import initSqlJs, {
+  type Database as SqlJsDatabase,
+  type SqlValue,
+} from 'sql.js'
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  copyFileSync,
+} from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { getConfigDir, getDbPath } from './config.js'
@@ -302,7 +311,10 @@ export class Db {
     }
   }
 
-  private queryAll(sql: string, params: SqlValue[] = []): Record<string, unknown>[] {
+  private queryAll(
+    sql: string,
+    params: SqlValue[] = []
+  ): Record<string, unknown>[] {
     const stmt = this.db.prepare(sql)
     if (params.length > 0) {
       stmt.bind(params)
@@ -317,12 +329,18 @@ export class Db {
     return results
   }
 
-  private queryOne(sql: string, params: SqlValue[] = []): Record<string, unknown> | undefined {
+  private queryOne(
+    sql: string,
+    params: SqlValue[] = []
+  ): Record<string, unknown> | undefined {
     const results = this.queryAll(sql, params)
     return results[0]
   }
 
-  private runSql(sql: string, params: SqlValue[] = []): { lastInsertRowid: number } {
+  private runSql(
+    sql: string,
+    params: SqlValue[] = []
+  ): { lastInsertRowid: number } {
     this.db.run(sql, params)
     const result = this.db.exec('SELECT last_insert_rowid() as id')
     const lastId = result[0]?.values[0]?.[0] as number
@@ -428,7 +446,10 @@ export class Db {
         }
       }
 
-      this.runSql(`UPDATE settings SET ${setPairs.join(', ')} WHERE id = 1`, params)
+      this.runSql(
+        `UPDATE settings SET ${setPairs.join(', ')} WHERE id = 1`,
+        params
+      )
 
       return this.select({ table: 'settings' }) as T extends 'settings'
         ? Settings
@@ -438,20 +459,41 @@ export class Db {
     }
 
     const now = new Date().toISOString()
-    const record = { ...value, created_at: now, updated_at: now } as Record<string, unknown>
+    const record = { ...value, created_at: now, updated_at: now } as Record<
+      string,
+      unknown
+    >
 
     // Convert booleans to integers for SQLite
     if (table === 'keypair') {
-      record.passphrase_protected = boolToInt(record.passphrase_protected as boolean)
-      record.can_sign = boolToInt((record.can_sign as boolean | undefined) ?? true)
-      record.can_encrypt = boolToInt((record.can_encrypt as boolean | undefined) ?? true)
-      record.can_certify = boolToInt((record.can_certify as boolean | undefined) ?? false)
-      record.can_authenticate = boolToInt((record.can_authenticate as boolean | undefined) ?? false)
-      record.revoked = boolToInt((record.revoked as boolean | undefined) ?? false)
-      record.is_default = boolToInt((record.is_default as boolean | undefined) ?? false)
+      record.passphrase_protected = boolToInt(
+        record.passphrase_protected as boolean
+      )
+      record.can_sign = boolToInt(
+        (record.can_sign as boolean | undefined) ?? true
+      )
+      record.can_encrypt = boolToInt(
+        (record.can_encrypt as boolean | undefined) ?? true
+      )
+      record.can_certify = boolToInt(
+        (record.can_certify as boolean | undefined) ?? false
+      )
+      record.can_authenticate = boolToInt(
+        (record.can_authenticate as boolean | undefined) ?? false
+      )
+      record.revoked = boolToInt(
+        (record.revoked as boolean | undefined) ?? false
+      )
+      record.is_default = boolToInt(
+        (record.is_default as boolean | undefined) ?? false
+      )
     } else if (table === 'contact') {
-      record.trusted = boolToInt((record.trusted as boolean | undefined) ?? false)
-      record.revoked = boolToInt((record.revoked as boolean | undefined) ?? false)
+      record.trusted = boolToInt(
+        (record.trusted as boolean | undefined) ?? false
+      )
+      record.revoked = boolToInt(
+        (record.revoked as boolean | undefined) ?? false
+      )
     }
 
     const keys = Object.keys(record)
@@ -462,8 +504,14 @@ export class Db {
     const info = this.runSql(sql, values)
 
     // Fetch and return the inserted record
-    const inserted = this.queryOne(`SELECT * FROM ${table} WHERE id = ?`, [info.lastInsertRowid])
-    return inserted as T extends 'settings' ? Settings : T extends 'keypair' ? Keypair : Contact
+    const inserted = this.queryOne(`SELECT * FROM ${table} WHERE id = ?`, [
+      info.lastInsertRowid,
+    ])
+    return inserted as T extends 'settings'
+      ? Settings
+      : T extends 'keypair'
+        ? Keypair
+        : Contact
   }
 
   public update<T extends keyof Schema>(
@@ -484,22 +532,35 @@ export class Db {
     // Convert booleans to integers for SQLite
     if (table === 'keypair') {
       if ('passphrase_protected' in record)
-        record.passphrase_protected = boolToInt(record.passphrase_protected as boolean)
-      if ('can_sign' in record) record.can_sign = boolToInt(record.can_sign as boolean)
-      if ('can_encrypt' in record) record.can_encrypt = boolToInt(record.can_encrypt as boolean)
-      if ('can_certify' in record) record.can_certify = boolToInt(record.can_certify as boolean)
+        record.passphrase_protected = boolToInt(
+          record.passphrase_protected as boolean
+        )
+      if ('can_sign' in record)
+        record.can_sign = boolToInt(record.can_sign as boolean)
+      if ('can_encrypt' in record)
+        record.can_encrypt = boolToInt(record.can_encrypt as boolean)
+      if ('can_certify' in record)
+        record.can_certify = boolToInt(record.can_certify as boolean)
       if ('can_authenticate' in record)
         record.can_authenticate = boolToInt(record.can_authenticate as boolean)
-      if ('revoked' in record) record.revoked = boolToInt(record.revoked as boolean)
-      if ('is_default' in record) record.is_default = boolToInt(record.is_default as boolean)
+      if ('revoked' in record)
+        record.revoked = boolToInt(record.revoked as boolean)
+      if ('is_default' in record)
+        record.is_default = boolToInt(record.is_default as boolean)
     } else if (table === 'contact') {
-      if ('trusted' in record) record.trusted = boolToInt(record.trusted as boolean)
-      if ('revoked' in record) record.revoked = boolToInt(record.revoked as boolean)
+      if ('trusted' in record)
+        record.trusted = boolToInt(record.trusted as boolean)
+      if ('revoked' in record)
+        record.revoked = boolToInt(record.revoked as boolean)
     } else if (table === 'settings') {
       if ('auto_sign_messages' in record)
-        record.auto_sign_messages = boolToInt(record.auto_sign_messages as boolean)
+        record.auto_sign_messages = boolToInt(
+          record.auto_sign_messages as boolean
+        )
       if ('prefer_inline_pgp' in record)
-        record.prefer_inline_pgp = boolToInt(record.prefer_inline_pgp as boolean)
+        record.prefer_inline_pgp = boolToInt(
+          record.prefer_inline_pgp as boolean
+        )
     }
 
     const setPairs: string[] = []
