@@ -2,6 +2,48 @@ import * as openpgp from 'openpgp'
 import type { Keypair } from './db.js'
 
 /**
+ * Obfuscate a display name aggressively: keep the first and last character,
+ * star the rest. Short names (<=2 chars) are passed through.
+ * Example: "kminda" -> "k****a", "Alice" -> "A***e".
+ */
+export function obfuscateName(name: string): string {
+  if (!name) return name
+  const trimmed = name.trim()
+  if (trimmed.length <= 2) return trimmed
+  if (trimmed.length === 3) {
+    return `${trimmed[0]}*${trimmed[trimmed.length - 1]}`
+  }
+  return `${trimmed[0]}${'*'.repeat(trimmed.length - 2)}${trimmed[trimmed.length - 1]}`
+}
+
+/**
+ * Format a recipient's identity for ephemeral display (encrypt confirmation,
+ * recipient list summary). Masks name and email so screenshots/streams don't
+ * leak the recipient's identity, while still letting the user recognise it.
+ */
+export function formatMaskedRecipient(info: {
+  name?: string | null
+  email?: string | null
+  fingerprint?: string | null
+}): string {
+  const hasName =
+    !!info.name && info.name !== 'Unknown' && info.name.trim().length > 0
+  const hasEmail =
+    !!info.email &&
+    info.email !== 'unknown@example.com' &&
+    info.email.trim().length > 0
+
+  const maskedName = hasName ? obfuscateName(info.name!) : null
+  const maskedEmail = hasEmail ? obfuscateEmail(info.email!) : null
+
+  if (maskedName && maskedEmail) return `${maskedName} <${maskedEmail}>`
+  if (maskedName) return maskedName
+  if (maskedEmail) return maskedEmail
+  if (info.fingerprint) return `key ${info.fingerprint.slice(-8)}`
+  return 'unknown'
+}
+
+/**
  * Obfuscate an email address for privacy
  * Example: "kevinlong@protonmail.com" -> "ke******ng@p*********.com"
  */

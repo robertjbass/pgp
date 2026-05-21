@@ -6,7 +6,7 @@ import clipboardy from 'clipboardy'
 import { Command } from 'commander'
 import { Db, type Keypair } from './db.js'
 import { KeyManager } from './key-manager.js'
-import { extractPublicKeyInfo } from './key-utils.js'
+import { extractPublicKeyInfo, formatMaskedRecipient } from './key-utils.js'
 import {
   escapeablePrompt,
   enableGlobalEscape,
@@ -626,10 +626,7 @@ function startInteractiveMode(): void {
       const armored = keys[0]!
       await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
       const info = await extractPublicKeyInfo(armored)
-      const name =
-        info.name && info.name !== 'Unknown'
-          ? `${info.name} <${info.email}>`
-          : info.email
+      const name = formatMaskedRecipient(info)
       return { name, publicKey: armored, isNew: true }
     } catch (error) {
       showError(
@@ -731,7 +728,11 @@ function startInteractiveMode(): void {
           const c = contacts.find((x) => x.id === id)
           if (c) {
             recipients.push({
-              name: `${c.name} <${c.email}>`,
+              name: formatMaskedRecipient({
+                name: c.name,
+                email: c.email,
+                fingerprint: c.fingerprint,
+              }),
               publicKey: c.public_key,
               isNew: false,
             })
@@ -751,10 +752,7 @@ function startInteractiveMode(): void {
           try {
             await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
             const info = await extractPublicKeyInfo(armored)
-            const name =
-              info.name && info.name !== 'Unknown'
-                ? `${info.name} <${info.email}>`
-                : info.email
+            const name = formatMaskedRecipient(info)
             if (recipients.some((r) => r.publicKey === armored)) {
               showWarning(`Skipping duplicate: ${name}`)
               continue
@@ -849,10 +847,7 @@ function startInteractiveMode(): void {
       try {
         await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
         const info = await extractPublicKeyInfo(armored)
-        const name =
-          info.name && info.name !== 'Unknown'
-            ? `${info.name} <${info.email}>`
-            : info.email || info.fingerprint.slice(-16)
+        const masked = formatMaskedRecipient(info)
 
         const { useClipboard } = await escapeablePrompt<{
           useClipboard: boolean
@@ -860,13 +855,15 @@ function startInteractiveMode(): void {
           {
             type: 'confirm',
             name: 'useClipboard',
-            message: promptMessage(`Encrypt for ${colors.successBold(name)}?`),
+            message: promptMessage(
+              `Encrypt for ${colors.successBold(masked)}?`,
+            ),
             default: true,
           },
         ])
 
         if (useClipboard) {
-          recipients = [{ name, publicKey: armored, isNew: true }]
+          recipients = [{ name: masked, publicKey: armored, isNew: true }]
         }
       } catch {
         // Bad key, fall through to picker
@@ -934,7 +931,15 @@ function startInteractiveMode(): void {
         const c = contacts.find((x) => x.id === contactId)
         if (!c) return
         recipients = [
-          { name: `${c.name} <${c.email}>`, publicKey: c.public_key, isNew: false },
+          {
+            name: formatMaskedRecipient({
+              name: c.name,
+              email: c.email,
+              fingerprint: c.fingerprint,
+            }),
+            publicKey: c.public_key,
+            isNew: false,
+          },
         ]
       } else if (recipient === 'paste') {
         const r = await getRecipientFromPaste()
