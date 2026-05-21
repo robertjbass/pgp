@@ -19,7 +19,10 @@ import {
   type SystemKey,
 } from './system-keys.js'
 import { escapeablePrompt } from './prompts.js'
-import { hasStoredPassphrase, deleteStoredPassphrase } from './keychain.js'
+import {
+  hasCachedPassphrase,
+  removeCachedPassphrase,
+} from './passphrase-store.js'
 import {
   colors,
   icons,
@@ -827,9 +830,8 @@ export class KeyManager {
     console.log(formatKeypairInfo(keypair))
     console.log()
 
-    // Check if passphrase is stored in keychain
     const hasStoredPw = keypair.passphrase_protected
-      ? await hasStoredPassphrase(keypair.fingerprint)
+      ? hasCachedPassphrase(keypair.fingerprint)
       : false
 
     // Build menu choices dynamically
@@ -840,10 +842,9 @@ export class KeyManager {
       { name: `${icons.key} Set as default`, value: 'set-default' },
     ]
 
-    // Add passphrase management option if applicable
     if (hasStoredPw) {
       choices.push({
-        name: `${icons.unlocked} Clear saved passphrase ${colors.muted('(from keychain)')}`,
+        name: `${icons.unlocked} Clear saved passphrase ${colors.muted('(from local cache)')}`,
         value: 'clear-passphrase',
       })
     }
@@ -1053,32 +1054,21 @@ export class KeyManager {
     console.log()
   }
 
-  /**
-   * Clear stored passphrase from system keychain
-   */
   private async clearStoredPassphrase(keypair: Keypair): Promise<void> {
     const { confirm } = await escapeablePrompt([
       {
         type: 'confirm',
         name: 'confirm',
-        message: promptMessage('Remove saved passphrase from system keychain?'),
+        message: promptMessage('Remove saved passphrase from local cache?'),
         default: true,
       },
     ])
 
     if (confirm) {
-      const deleted = await deleteStoredPassphrase(keypair.fingerprint)
-      if (deleted) {
-        console.log()
-        showSuccess('Saved passphrase removed from system keychain.')
-        console.log()
-      } else {
-        console.log()
-        showWarning(
-          'Could not remove passphrase (may not exist or keychain unavailable).'
-        )
-        console.log()
-      }
+      removeCachedPassphrase(keypair.fingerprint)
+      console.log()
+      showSuccess('Saved passphrase removed.')
+      console.log()
     }
   }
 

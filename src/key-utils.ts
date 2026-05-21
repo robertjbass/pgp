@@ -51,6 +51,7 @@ const weakKeyConfig = {
   rejectHashAlgorithms: new Set(),
   rejectMessageHashAlgorithms: new Set(),
   rejectCurves: new Set(),
+  allowMissingKeyFlags: true,
 }
 
 export async function extractPublicKeyInfo(armoredKey: string): Promise<{
