@@ -24,6 +24,12 @@ import {
   removeCachedPassphrase,
 } from './passphrase-store.js'
 import {
+  getInstalledVersion,
+  getLatestVersion,
+  isOlderVersion,
+  installOrUpdateGlobally,
+} from './version-check.js'
+import {
   colors,
   icons,
   printBanner,
@@ -723,24 +729,45 @@ export class KeyManager {
     console.log()
   }
 
-  /**
-   * Show key management menu
-   */
   async showKeyManagementMenu(): Promise<'back' | 'main-menu' | void> {
+    const installedVersion = getInstalledVersion()
+    const latestVersion = getLatestVersion()
+    const hasUpdate =
+      installedVersion &&
+      latestVersion &&
+      isOlderVersion(installedVersion, latestVersion)
+
+    const choices: any[] = [
+      { name: `${icons.key} View/manage my keys`, value: 'view' },
+      { name: `${icons.contact} View/manage contacts`, value: 'contacts' },
+      { name: `${icons.import} Import keypair`, value: 'import' },
+      { name: `${icons.gpg} Import from system GPG`, value: 'import-gpg' },
+      { name: `${icons.generate} Generate new keypair`, value: 'generate' },
+    ]
+
+    if (!installedVersion) {
+      choices.push(new inquirer.Separator(colors.muted('  ─────────')))
+      choices.push({
+        name: `${icons.add} Install lpgp globally ${colors.muted('(for offline use)')}`,
+        value: 'install',
+      })
+    } else if (hasUpdate) {
+      choices.push(new inquirer.Separator(colors.muted('  ─────────')))
+      choices.push({
+        name: `${icons.add} Update lpgp ${colors.muted(`(${installedVersion} → ${latestVersion})`)}`,
+        value: 'update',
+      })
+    }
+
+    choices.push(new inquirer.Separator(colors.muted('  ─────────')))
+    choices.push(mainMenuChoice())
+
     const { action } = await escapeablePrompt([
       {
         type: 'list',
         name: 'action',
-        message: promptMessage('Key Management'),
-        choices: [
-          { name: `${icons.key} View/manage my keys`, value: 'view' },
-          { name: `${icons.contact} View/manage contacts`, value: 'contacts' },
-          { name: `${icons.import} Import keypair`, value: 'import' },
-          { name: `${icons.gpg} Import from system GPG`, value: 'import-gpg' },
-          { name: `${icons.generate} Generate new keypair`, value: 'generate' },
-          new inquirer.Separator(),
-          mainMenuChoice(),
-        ],
+        message: promptMessage('Manage keys & contacts'),
+        choices,
       },
     ])
 
@@ -765,6 +792,18 @@ export class KeyManager {
         break
       case 'generate':
         await this.generateKeypair()
+        await this.showKeyManagementMenu()
+        break
+      case 'install':
+      case 'update':
+        await installOrUpdateGlobally(action === 'update')
+        await escapeablePrompt([
+          {
+            type: 'input',
+            name: 'continue',
+            message: colors.muted('Press Enter to continue…'),
+          },
+        ])
         await this.showKeyManagementMenu()
         break
       case 'back':

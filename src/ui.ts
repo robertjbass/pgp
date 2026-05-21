@@ -90,31 +90,46 @@ export const icons = {
 // Banner and Headers
 // ============================================================================
 
+import { readFileSync } from 'fs'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
+
 const APP_NAME = 'lpgp'
-const BANNER_WIDTH = 42
+
+let _version: string | undefined
+function getVersion(): string {
+  if (_version !== undefined) return _version
+  let resolved = ''
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8'))
+    if (typeof pkg.version === 'string') resolved = pkg.version
+  } catch {
+    // fall through
+  }
+  _version = resolved
+  return resolved
+}
 
 export function printBanner(): void {
   console.clear()
-  const title = APP_NAME.padStart((BANNER_WIDTH + APP_NAME.length) / 2).padEnd(
-    BANNER_WIDTH
-  )
+  const version = getVersion()
+  const tag = version ? colors.muted(` · v${version}`) : ''
   console.log()
-  console.log(colors.primaryBold('╔' + '═'.repeat(BANNER_WIDTH) + '╗'))
-  console.log(
-    colors.primaryBold('║') + colors.primary(title) + colors.primaryBold('║')
-  )
-  console.log(colors.primaryBold('╚' + '═'.repeat(BANNER_WIDTH) + '╝'))
+  console.log(`  ${colors.primaryBold(APP_NAME)}${tag}`)
+  console.log()
+}
+
+export function printHomeStatus(activeKey: string | null): void {
+  if (!activeKey) return
+  console.log(`  ${colors.muted(activeKey)}`)
   console.log()
 }
 
 export function printSectionHeader(title: string): void {
-  const padded = ` ${title} `
-    .padStart((BANNER_WIDTH + title.length + 2) / 2)
-    .padEnd(BANNER_WIDTH)
   console.log()
-  console.log(colors.infoBold('┌' + '─'.repeat(BANNER_WIDTH) + '┐'))
-  console.log(colors.infoBold('│') + colors.info(padded) + colors.infoBold('│'))
-  console.log(colors.infoBold('└' + '─'.repeat(BANNER_WIDTH) + '┘'))
+  console.log(`  ${colors.infoBold(title)}`)
+  console.log(`  ${colors.muted('─'.repeat(title.length))}`)
   console.log()
 }
 

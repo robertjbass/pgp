@@ -23,6 +23,7 @@ import {
   icons,
   printBanner,
   printDivider,
+  printHomeStatus,
   showSuccess,
   showError,
   showWarning,
@@ -150,102 +151,6 @@ function startInteractiveMode(): void {
   let db: Db
   let keyManager: KeyManager
   const unlockedKeys = new Map<string, openpgp.PrivateKey>()
-
-  // ---------- Version / install helpers ----------
-
-  function getInstalledVersion(): string | null {
-    try {
-      execSync('which lpgp 2>/dev/null', {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      const version = execSync('npm list -g lpgp --json 2>/dev/null', {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      const parsed = JSON.parse(version)
-      return parsed.dependencies?.lpgp?.version || null
-    } catch {
-      return null
-    }
-  }
-
-  function getLatestVersion(): string | null {
-    try {
-      const result = execSync('npm view lpgp version 2>/dev/null', {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      return result.trim()
-    } catch {
-      return null
-    }
-  }
-
-  function detectPackageManager(): 'pnpm' | 'yarn' | 'npm' {
-    try {
-      execSync('which pnpm 2>/dev/null', {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      return 'pnpm'
-    } catch {
-      try {
-        execSync('which yarn 2>/dev/null', {
-          stdio: ['pipe', 'pipe', 'pipe'],
-        })
-        return 'yarn'
-      } catch {
-        return 'npm'
-      }
-    }
-  }
-
-  function isOlderVersion(v1: string, v2: string): boolean {
-    const p1 = v1.split('.').map(Number)
-    const p2 = v2.split('.').map(Number)
-    for (let i = 0; i < 3; i++) {
-      if ((p1[i] || 0) < (p2[i] || 0)) return true
-      if ((p1[i] || 0) > (p2[i] || 0)) return false
-    }
-    return false
-  }
-
-  async function installOrUpdateGlobally(isUpdate: boolean): Promise<boolean> {
-    console.clear()
-    printBanner()
-    console.log()
-
-    const pm = detectPackageManager()
-    const action = isUpdate ? 'Updating' : 'Installing'
-    const cmd = pm === 'yarn' ? `yarn global add lpgp` : `${pm} install -g lpgp`
-
-    showLoading(`${action} lpgp globally...`)
-    console.log()
-    console.log(colors.muted(`Running: ${cmd}`))
-    console.log()
-
-    try {
-      execSync(cmd, { stdio: 'inherit' })
-      console.log()
-      if (isUpdate) {
-        showSuccess('lpgp updated successfully!')
-      } else {
-        showSuccess(
-          'lpgp installed globally! You can now run it with just "lpgp"',
-        )
-      }
-      console.log()
-      return true
-    } catch {
-      console.log()
-      showError(
-        `Failed to ${isUpdate ? 'update' : 'install'}. You may need to run with sudo:`,
-      )
-      console.log(colors.muted(`  sudo ${cmd}`))
-      console.log()
-      return false
-    }
-  }
 
   // ---------- Editor detection ----------
 
@@ -1182,51 +1087,23 @@ function startInteractiveMode(): void {
 
   async function showMainMenu(): Promise<void> {
     printBanner()
+    const defaultKp = keyManager.getDefaultKeypair()
+    printHomeStatus(defaultKp ? `${defaultKp.name} key` : null)
 
     const menuChoices: any[] = [
-      {
-        name: `${icons.clipboard} Copy my public key`,
-        value: 'copy',
-      },
-      {
-        name: `${icons.decrypt} Decrypt a message`,
-        value: 'decrypt',
-      },
-      {
-        name: `${icons.encrypt} Encrypt a message`,
-        value: 'encrypt',
-      },
-      new inquirer.Separator(),
+      { name: `${icons.clipboard} Copy my public key`, value: 'copy' },
+      { name: `${icons.decrypt} Decrypt a message`, value: 'decrypt' },
+      { name: `${icons.encrypt} Encrypt a message`, value: 'encrypt' },
+      new inquirer.Separator(colors.muted('  ─────────')),
       { name: `${icons.key} Manage keys & contacts`, value: 'keys' },
+      exitChoice(),
     ]
-
-    const installedVersion = getInstalledVersion()
-    const latestVersion = getLatestVersion()
-    if (!installedVersion) {
-      menuChoices.push(new inquirer.Separator())
-      menuChoices.push({
-        name: `${icons.add} Install lpgp globally ${colors.muted('(for offline use)')}`,
-        value: 'install',
-      })
-    } else if (
-      latestVersion &&
-      isOlderVersion(installedVersion, latestVersion)
-    ) {
-      menuChoices.push(new inquirer.Separator())
-      menuChoices.push({
-        name: `${icons.add} Update lpgp ${colors.muted(`(${installedVersion} → ${latestVersion})`)}`,
-        value: 'update',
-      })
-    }
-
-    menuChoices.push(new inquirer.Separator())
-    menuChoices.push(exitChoice())
 
     const { action } = await escapeablePrompt<{ action: string }>([
       {
         type: 'list',
         name: 'action',
-        message: promptMessage('What would you like to do?'),
+        message: promptMessage('Choose an action'),
         choices: menuChoices,
       },
     ])
@@ -1235,12 +1112,6 @@ function startInteractiveMode(): void {
       clearSession()
       console.clear()
       process.exit(0)
-    }
-
-    if (action === 'install' || action === 'update') {
-      await installOrUpdateGlobally(action === 'update')
-      await pause()
-      return
     }
 
     if (action === 'keys') {
