@@ -76,6 +76,26 @@ export function checkAndResetEscape(): boolean {
   return wasTriggered
 }
 
+// Apply sensible defaults to list-style prompts: no wrap-around, fit page to
+// content for short lists. Keeps the call sites concise.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyListDefaults(questions: any): any {
+  const enhance = (q: any) => {
+    if (q && (q.type === 'list' || q.type === 'rawlist')) {
+      const choices = Array.isArray(q.choices) ? q.choices : []
+      const next = { ...q }
+      if (next.loop === undefined) next.loop = false
+      if (next.pageSize === undefined && choices.length > 0 && choices.length <= 20) {
+        next.pageSize = choices.length
+      }
+      return next
+    }
+    return q
+  }
+  if (Array.isArray(questions)) return questions.map(enhance)
+  return enhance(questions)
+}
+
 // Wrapper for inquirer.prompt that supports escape key
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function escapeablePrompt<T = any>(
@@ -93,7 +113,7 @@ export async function escapeablePrompt<T = any>(
   })
 
   try {
-    const p = inquirer.prompt(questions)
+    const p = inquirer.prompt(applyListDefaults(questions))
     // Register the prompt UI so we can close it on escape
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const promptWithUi = p as any

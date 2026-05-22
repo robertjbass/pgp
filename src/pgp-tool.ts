@@ -1,15 +1,12 @@
 #!/usr/bin/env node
 import * as openpgp from 'openpgp'
 import inquirer from 'inquirer'
-import chalk from 'chalk'
 import { execSync } from 'child_process'
-import * as readline from 'readline'
-import { stdin as input, stdout as output } from 'process'
 import clipboardy from 'clipboardy'
 import { Command } from 'commander'
-import { Db } from './db.js'
+import { Db, type Keypair } from './db.js'
 import { KeyManager } from './key-manager.js'
-import { extractPublicKeyInfo } from './key-utils.js'
+import { extractPublicKeyInfo, formatMaskedRecipient } from './key-utils.js'
 import {
   escapeablePrompt,
   enableGlobalEscape,
@@ -17,24 +14,25 @@ import {
   EscapeError,
 } from './prompts.js'
 import {
-  getStoredPassphrase,
-  storePassphrase,
-  hasStoredPassphrase,
-} from './keychain.js'
+  getCachedPassphrase,
+  cachePassphrase,
+} from './passphrase-store.js'
+import { readInlineMultiline } from './inline-editor.js'
 import {
   colors,
   icons,
   printBanner,
   printDivider,
+  printHomeStatus,
   showSuccess,
   showError,
   showWarning,
+  showInfo,
   showLoading,
   promptMessage,
   mainMenuChoice,
   backChoice,
   exitChoice,
-  cancelChoice,
 } from './ui.js'
 import {
   generateCommand,
@@ -47,7 +45,6 @@ import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
-// Get package version
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 function getPackageVersion(): string {
@@ -60,18 +57,13 @@ function getPackageVersion(): string {
   }
 }
 
-// Helper: Collect multiple --to values
 function collect(value: string, previous: string[]): string[] {
   return previous.concat([value])
 }
 
-// Check if running in CLI mode (has subcommand arguments)
 function isCLIMode(): boolean {
-  // If we have arguments beyond the script name that look like commands
   const args = process.argv.slice(2)
   if (args.length === 0) return false
-
-  // Check if first arg is a known command or starts with -
   const commands = [
     'generate',
     'export-public',
@@ -86,7 +78,6 @@ function isCLIMode(): boolean {
   return commands.some((cmd) => args[0] === cmd || args[0]?.startsWith('-'))
 }
 
-// Set up CLI commands
 function setupCLI(): void {
   const program = new Command()
     .name('lpgp')
@@ -108,7 +99,7 @@ function setupCLI(): void {
     .description('Export public key to stdout')
     .option(
       '--fingerprint <fp>',
-      'Fingerprint of key to export (default: default keypair)'
+      'Fingerprint of key to export (default: default keypair)',
     )
     .option('--json', 'Output as JSON with metadata')
     .action(exportPublicCommand)
@@ -126,7 +117,7 @@ function setupCLI(): void {
       '--to <recipient>',
       'Recipient fingerprint or email (can be used multiple times)',
       collect,
-      []
+      [],
     )
     .option('--file <path>', 'Read message from file')
     .option('--output <path>', 'Write to file (default: stdout)')
@@ -142,323 +133,31 @@ function setupCLI(): void {
   program.parse()
 }
 
-// Run CLI mode if arguments provided
 if (isCLIMode()) {
   setupCLI()
 } else {
-  // Interactive mode - continue with existing behavior
   startInteractiveMode()
 }
 
 function startInteractiveMode(): void {
-  // Config to allow weak keys like DSA (not recommended for production)
   const weakKeyConfig = {
     rejectPublicKeyAlgorithms: new Set(),
     rejectHashAlgorithms: new Set(),
     rejectMessageHashAlgorithms: new Set(),
     rejectCurves: new Set(),
+    allowMissingKeyFlags: true,
   }
 
-  // Database and key manager (initialized in main())
   let db: Db
   let keyManager: KeyManager
+  const unlockedKeys = new Map<string, openpgp.PrivateKey>()
 
-  // Session passphrase cache - stores passphrases by keypair ID
-  const passphraseCache = new Map<number, string>()
-
-  // Get installed version of lpgp (null if not installed)
-  function getInstalledVersion(): string | null {
-    try {
-      // Check if lpgp is in PATH
-      execSync('which lpgp 2>/dev/null || where lpgp 2>nul', {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      // Get the installed version
-      const version = execSync('npm list -g lpgp --json 2>/dev/null', {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      const parsed = JSON.parse(version)
-      return parsed.dependencies?.lpgp?.version || null
-    } catch {
-      return null
-    }
-  }
-
-  // Get latest version from npm registry
-  function getLatestVersion(): string | null {
-    try {
-      const result = execSync('npm view lpgp version 2>/dev/null', {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      return result.trim()
-    } catch {
-      return null
-    }
-  }
-
-  // Detect which package manager to use
-  function detectPackageManager(): 'pnpm' | 'yarn' | 'npm' {
-    try {
-      execSync('which pnpm 2>/dev/null || where pnpm 2>nul', {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-      return 'pnpm'
-    } catch {
-      try {
-        execSync('which yarn 2>/dev/null || where yarn 2>nul', {
-          stdio: ['pipe', 'pipe', 'pipe'],
-        })
-        return 'yarn'
-      } catch {
-        return 'npm'
-      }
-    }
-  }
-
-  // Compare semver versions (returns true if v1 < v2)
-  function isOlderVersion(v1: string, v2: string): boolean {
-    const p1 = v1.split('.').map(Number)
-    const p2 = v2.split('.').map(Number)
-    for (let i = 0; i < 3; i++) {
-      if ((p1[i] || 0) < (p2[i] || 0)) return true
-      if ((p1[i] || 0) > (p2[i] || 0)) return false
-    }
-    return false
-  }
-
-  // Install or update lpgp globally
-  async function installOrUpdateGlobally(isUpdate: boolean): Promise<boolean> {
-    console.clear()
-    printBanner()
-    console.log()
-
-    const pm = detectPackageManager()
-    const action = isUpdate ? 'Updating' : 'Installing'
-    const cmd = pm === 'yarn' ? `yarn global add lpgp` : `${pm} install -g lpgp`
-
-    showLoading(`${action} lpgp globally...`)
-    console.log()
-    console.log(colors.muted(`Running: ${cmd}`))
-    console.log()
-
-    try {
-      execSync(cmd, { stdio: 'inherit' })
-      console.log()
-      if (isUpdate) {
-        showSuccess('lpgp updated successfully!')
-      } else {
-        showSuccess(
-          'lpgp installed globally! You can now run it with just "lpgp"'
-        )
-      }
-      console.log()
-      return true
-    } catch {
-      console.log()
-      showError(
-        `Failed to ${isUpdate ? 'update' : 'install'}. You may need to run with sudo:`
-      )
-      console.log(colors.muted(`  sudo ${cmd}`))
-      console.log()
-      return false
-    }
-  }
+  // ---------- Editor detection ----------
 
   type EditorChoice = {
     name: string
     command: string
     available: boolean
-  }
-
-  async function encryptMessage(
-    message: string,
-    publicKeysArmored?: string | string[]
-  ): Promise<string> {
-    let publicKeys: openpgp.PublicKey[]
-
-    if (publicKeysArmored) {
-      // Use provided public key(s)
-      const keysArray = Array.isArray(publicKeysArmored)
-        ? publicKeysArmored
-        : [publicKeysArmored]
-      publicKeys = await Promise.all(
-        keysArray.map((key) =>
-          openpgp.readKey({ armoredKey: key, config: weakKeyConfig })
-        )
-      )
-    } else {
-      // Use default keypair's public key (encrypt to self)
-      const defaultKeypair = await keyManager.getDefaultKeypair()
-      if (!defaultKeypair) {
-        throw new Error(
-          'No default keypair found. Please set up a keypair first.'
-        )
-      }
-      publicKeys = [
-        await openpgp.readKey({
-          armoredKey: defaultKeypair.public_key,
-          config: weakKeyConfig,
-        }),
-      ]
-
-      // Update last_used_at
-      db.update(
-        'keypair',
-        { key: 'id', value: defaultKeypair.id },
-        { last_used_at: new Date().toISOString() }
-      )
-    }
-
-    const encrypted = await openpgp.encrypt({
-      message: await openpgp.createMessage({ text: message }),
-      encryptionKeys: publicKeys,
-      config: weakKeyConfig,
-    })
-
-    return encrypted as string
-  }
-
-  async function decryptMessage(encryptedMessage: string): Promise<string> {
-    const defaultKeypair = await keyManager.getDefaultKeypair()
-    if (!defaultKeypair) {
-      throw new Error(
-        'No default keypair found. Please set up a keypair first.'
-      )
-    }
-
-    // Check if passphrase is cached for this keypair
-    let passphrase = ''
-    if (defaultKeypair.passphrase_protected) {
-      if (passphraseCache.has(defaultKeypair.id)) {
-        // Use session-cached passphrase
-        passphrase = passphraseCache.get(defaultKeypair.id)!
-      } else {
-        // Check if passphrase is stored in system keychain
-        const storedPassphrase = await getStoredPassphrase(
-          defaultKeypair.fingerprint
-        )
-        if (storedPassphrase) {
-          // Validate the stored passphrase
-          try {
-            await openpgp.decryptKey({
-              privateKey: await openpgp.readPrivateKey({
-                armoredKey: defaultKeypair.private_key,
-                config: weakKeyConfig,
-              }),
-              passphrase: storedPassphrase,
-              config: weakKeyConfig,
-            })
-            // Stored passphrase is valid, use it
-            passphrase = storedPassphrase
-            passphraseCache.set(defaultKeypair.id, passphrase)
-            console.log(colors.muted('Using passphrase from system keychain'))
-          } catch {
-            // Stored passphrase is invalid (key may have changed), prompt for new one
-            showWarning(
-              'Stored passphrase is invalid. Please enter your passphrase.'
-            )
-          }
-        }
-
-        // If we still don't have a valid passphrase, prompt for it
-        if (!passphrase) {
-          const { passphraseInput } = await escapeablePrompt([
-            {
-              type: 'password',
-              name: 'passphraseInput',
-              message: promptMessage('Enter your private key passphrase:'),
-              mask: '*',
-            },
-          ])
-          passphrase = passphraseInput
-
-          // Validate the passphrase by attempting to decrypt the key
-          try {
-            await openpgp.decryptKey({
-              privateKey: await openpgp.readPrivateKey({
-                armoredKey: defaultKeypair.private_key,
-                config: weakKeyConfig,
-              }),
-              passphrase,
-              config: weakKeyConfig,
-            })
-            // If successful, cache the passphrase in session
-            passphraseCache.set(defaultKeypair.id, passphrase)
-
-            // Ask if user wants to save passphrase to system keychain
-            const alreadyStored = await hasStoredPassphrase(
-              defaultKeypair.fingerprint
-            )
-            if (!alreadyStored) {
-              const { saveToKeychain } = await escapeablePrompt([
-                {
-                  type: 'confirm',
-                  name: 'saveToKeychain',
-                  message: promptMessage('Save passphrase to system keychain?'),
-                  default: false,
-                },
-              ])
-
-              if (saveToKeychain) {
-                const saved = await storePassphrase(
-                  defaultKeypair.fingerprint,
-                  passphrase
-                )
-                if (saved) {
-                  showSuccess('Passphrase saved to system keychain')
-                } else {
-                  showWarning(
-                    'Could not save to keychain (may not be available on this system)'
-                  )
-                }
-              }
-            }
-          } catch (error) {
-            throw new Error('Incorrect passphrase')
-          }
-        }
-      }
-    }
-
-    // Only decrypt the key if it's passphrase-protected
-    let privateKey: openpgp.PrivateKey
-    if (defaultKeypair.passphrase_protected) {
-      privateKey = await openpgp.decryptKey({
-        privateKey: await openpgp.readPrivateKey({
-          armoredKey: defaultKeypair.private_key,
-          config: weakKeyConfig,
-        }),
-        passphrase,
-        config: weakKeyConfig,
-      })
-    } else {
-      privateKey = await openpgp.readPrivateKey({
-        armoredKey: defaultKeypair.private_key,
-        config: weakKeyConfig,
-      })
-    }
-
-    const message = await openpgp.readMessage({
-      armoredMessage: encryptedMessage,
-    })
-
-    const { data: decrypted } = await openpgp.decrypt({
-      message,
-      decryptionKeys: privateKey,
-      config: weakKeyConfig,
-    })
-
-    // Update last_used_at
-    db.update(
-      'keypair',
-      { key: 'id', value: defaultKeypair.id },
-      { last_used_at: new Date().toISOString() }
-    )
-
-    return decrypted as string
   }
 
   function checkEditorAvailable(command: string): boolean {
@@ -479,17 +178,15 @@ function startInteractiveMode(): void {
       { name: 'Emacs', command: 'emacs', available: false },
     ]
 
-    // Check platform specific editors
     if (process.platform === 'darwin') {
       editors.push({ name: 'TextEdit', command: 'open -e', available: true })
     } else if (process.platform === 'win32') {
       editors.push({ name: 'Notepad', command: 'notepad', available: true })
     }
 
-    // Check which editors are available
     for (const editor of editors) {
       if (editor.command.includes('open -e') || editor.command === 'notepad') {
-        editor.available = true // TextEdit and Notepad are always available on their platforms
+        editor.available = true
       } else {
         editor.available = checkEditorAvailable(editor.command)
       }
@@ -497,347 +194,6 @@ function startInteractiveMode(): void {
 
     return editors.filter((e) => e.available)
   }
-
-  async function readInlineMultilineInput(promptText: string): Promise<string> {
-    console.log(promptMessage(promptText))
-    console.log(
-      colors.muted('(Type your message. Press Enter, then Ctrl+D to finish)\n')
-    )
-
-    const rl = readline.createInterface({ input, output })
-    rl.setPrompt('')
-    const lines: string[] = []
-
-    return new Promise((resolve) => {
-      rl.on('line', (line) => {
-        lines.push(line)
-      })
-
-      rl.on('close', () => {
-        resolve(lines.join('\n'))
-      })
-    })
-  }
-
-  type Recipient = {
-    name: string
-    publicKey: string
-  }
-
-  function extractAllPublicKeys(content: string): string[] {
-    const keyRegex =
-      /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/g
-    const matches = content.match(keyRegex)
-    return matches || []
-  }
-
-  async function addKeysFromClipboard(
-    recipients: Recipient[]
-  ): Promise<number> {
-    let clipboardContent = ''
-    try {
-      clipboardContent = await clipboardy.read()
-    } catch {
-      showWarning('Could not access clipboard')
-      return 0
-    }
-
-    const keys = extractAllPublicKeys(clipboardContent)
-    if (keys.length === 0) {
-      showWarning('No public keys found in clipboard')
-      return 0
-    }
-
-    let addedCount = 0
-    for (const publicKey of keys) {
-      try {
-        // Validate the key
-        await openpgp.readKey({ armoredKey: publicKey, config: weakKeyConfig })
-        const keyInfo = await extractPublicKeyInfo(publicKey)
-        const recipientName =
-          keyInfo.email || keyInfo.fingerprint?.slice(-8) || 'Unknown'
-
-        // Check for duplicates
-        const isDuplicate = recipients.some((r) => r.publicKey === publicKey)
-        if (isDuplicate) {
-          showWarning(`Skipping duplicate key: ${recipientName}`)
-          continue
-        }
-
-        recipients.push({
-          name: recipientName,
-          publicKey,
-        })
-        showSuccess(`Added recipient: ${recipientName}`)
-        addedCount++
-      } catch (error) {
-        showError(
-          `Failed to parse a key: ${error instanceof Error ? error.message : 'unknown error'}`
-        )
-      }
-    }
-
-    return addedCount
-  }
-
-  async function selectMultipleRecipients(): Promise<Recipient[]> {
-    const recipients: Recipient[] = []
-    const contacts = db.select({ table: 'contact' })
-    const defaultKeypair = await keyManager.getDefaultKeypair()
-
-    // Build the menu choices
-    function buildChoices() {
-      const choices: Array<{ name: string; value: string }> = []
-
-      // Show current recipients count
-      if (recipients.length > 0) {
-        choices.push({
-          name: colors.primary(
-            `── Current recipients: ${recipients.length} ──`
-          ),
-          value: 'show-recipients',
-        })
-      }
-
-      // Option to add self (if not already added)
-      const selfAdded = recipients.some((r) => r.name === 'Myself')
-      if (defaultKeypair && !selfAdded) {
-        choices.push({
-          name: `${icons.key} Add myself ${colors.muted('(so I can also decrypt)')}`,
-          value: 'self',
-        })
-      }
-
-      // Option to select from contacts
-      if (contacts.length > 0) {
-        choices.push({
-          name: `${icons.contact} Select from saved contacts ${colors.muted(`(${contacts.length} available)`)}`,
-          value: 'contacts',
-        })
-      }
-
-      // Clipboard and manual options
-      choices.push({
-        name: `${icons.clipboard} Paste from clipboard ${colors.muted('(supports multiple keys)')}`,
-        value: 'clipboard',
-      })
-      choices.push({
-        name: `${icons.inline} Type/paste a single key`,
-        value: 'manual',
-      })
-
-      // Done or cancel
-      choices.push({
-        name:
-          recipients.length > 0
-            ? `${icons.success} Done adding recipients`
-            : `${icons.back} Cancel`,
-        value: 'done',
-      })
-
-      return choices
-    }
-
-    let addMore = true
-    while (addMore) {
-      const { addMethod } = await escapeablePrompt([
-        {
-          type: 'list',
-          name: 'addMethod',
-          message: promptMessage('Add recipients:'),
-          choices: buildChoices(),
-        },
-      ])
-
-      if (addMethod === 'done') {
-        addMore = false
-      } else if (addMethod === 'show-recipients') {
-        // Show current recipients
-        console.log(colors.primary('\nCurrent recipients:'))
-        for (const r of recipients) {
-          console.log(colors.muted(`   • ${r.name}`))
-        }
-        console.log()
-      } else if (addMethod === 'self') {
-        if (defaultKeypair) {
-          recipients.push({
-            name: 'Myself',
-            publicKey: defaultKeypair.public_key,
-          })
-          showSuccess('Added yourself as a recipient')
-        }
-      } else if (addMethod === 'contacts') {
-        // Show contacts as a checkbox
-        const { selectedContacts } = await escapeablePrompt([
-          {
-            type: 'checkbox',
-            name: 'selectedContacts',
-            message: promptMessage(
-              'Select contacts (space to toggle, enter to confirm):'
-            ),
-            choices: contacts.map((c) => {
-              const alreadyAdded = recipients.some(
-                (r) => r.publicKey === c.public_key
-              )
-              return {
-                name: `${c.name} <${c.email || 'no email'}>${alreadyAdded ? colors.muted(' (already added)') : ''}`,
-                value: c.id,
-                checked: false,
-                disabled: alreadyAdded,
-              }
-            }),
-          },
-        ])
-
-        let addedCount = 0
-        for (const contactId of selectedContacts) {
-          const contact = contacts.find((c) => c.id === contactId)
-          if (contact) {
-            recipients.push({
-              name: `${contact.name} <${contact.email || 'no email'}>`,
-              publicKey: contact.public_key,
-            })
-            addedCount++
-          }
-        }
-        if (addedCount > 0) {
-          showSuccess(`Added ${addedCount} contact${addedCount > 1 ? 's' : ''}`)
-        }
-      } else if (addMethod === 'clipboard') {
-        const added = await addKeysFromClipboard(recipients)
-        if (added > 0) {
-          console.log()
-          showSuccess(
-            `Added ${added} recipient${added > 1 ? 's' : ''} from clipboard`
-          )
-          console.log()
-        }
-      } else if (addMethod === 'manual') {
-        const publicKey = await getRecipientPublicKey()
-        if (publicKey) {
-          try {
-            const keyInfo = await extractPublicKeyInfo(publicKey)
-            const recipientName =
-              keyInfo.email || keyInfo.fingerprint?.slice(-8) || 'Unknown'
-
-            // Check for duplicates
-            const isDuplicate = recipients.some(
-              (r) => r.publicKey === publicKey
-            )
-            if (isDuplicate) {
-              showWarning('This recipient is already in the list')
-            } else {
-              recipients.push({
-                name: recipientName,
-                publicKey,
-              })
-              showSuccess(`Added recipient: ${recipientName}`)
-            }
-          } catch (error) {
-            showError('Failed to parse public key')
-          }
-        }
-      }
-    }
-
-    return recipients
-  }
-
-  async function getRecipientPublicKey(): Promise<string | null> {
-    // Check clipboard for public key
-    let clipboardContent = ''
-    let hasPublicKeyInClipboard = false
-
-    try {
-      clipboardContent = await clipboardy.read()
-      hasPublicKeyInClipboard = clipboardContent.includes(
-        'BEGIN PGP PUBLIC KEY BLOCK'
-      )
-    } catch (e) {
-      // Clipboard not available, continue without it
-    }
-
-    let publicKey = ''
-
-    // If public key found in clipboard, ask if user wants to use it
-    if (hasPublicKeyInClipboard) {
-      const { useClipboard } = await escapeablePrompt([
-        {
-          type: 'confirm',
-          name: 'useClipboard',
-          message: 'Public key detected in clipboard. Use it?',
-          default: true,
-        },
-      ])
-
-      if (useClipboard) {
-        const publicMatch = clipboardContent.match(
-          /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/
-        )
-        if (publicMatch) {
-          publicKey = publicMatch[0]
-        }
-      }
-    }
-
-    // If no key from clipboard, prompt for input
-    if (!publicKey) {
-      console.log(promptMessage("\nPaste the recipient's PGP PUBLIC key:"))
-      console.log(
-        colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)\n')
-      )
-
-      const rl = readline.createInterface({ input, output })
-      rl.setPrompt('')
-      const lines: string[] = []
-
-      publicKey = await new Promise((resolve) => {
-        rl.on('line', (line: string) => {
-          lines.push(line)
-          const content = lines.join('\n')
-
-          // Check if we have a complete key block and current line is empty
-          if (
-            line.trim() === '' &&
-            content.includes('-----BEGIN PGP PUBLIC KEY BLOCK') &&
-            content.includes('-----END PGP PUBLIC KEY BLOCK')
-          ) {
-            rl.close()
-            resolve(content.trim())
-          }
-        })
-
-        rl.on('close', () => {
-          resolve(lines.join('\n'))
-        })
-      })
-    }
-
-    // Validate public key format
-    if (!publicKey.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
-      console.log()
-      showError('Invalid public key format')
-      console.log()
-      return null
-    }
-
-    // Try to read the key to validate it
-    try {
-      await openpgp.readKey({ armoredKey: publicKey, config: weakKeyConfig })
-      console.log()
-      showSuccess('Valid public key')
-      console.log()
-      return publicKey
-    } catch (error) {
-      console.log()
-      showError(
-        `Failed to read public key: ${error instanceof Error ? error.message : error}`
-      )
-      return null
-    }
-  }
-
-  // printBanner is imported from ui.ts
 
   function getEditorInstructions(editorCommand: string): string {
     const instructions: Record<string, string> = {
@@ -852,13 +208,945 @@ function startInteractiveMode(): void {
     return instructions[editorCommand] || 'Save and close the editor when done'
   }
 
-  function clearPassphraseCache() {
-    // Clear all cached passphrases from memory
-    passphraseCache.clear()
+  // ---------- Clipboard / key extraction ----------
+
+  function extractAllPublicKeys(content: string): string[] {
+    const keyRegex =
+      /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/g
+    return content.match(keyRegex) ?? []
   }
 
-  async function main() {
-    // Initialize database on first run
+  async function readClipboardSafe(): Promise<string | null> {
+    try {
+      return await clipboardy.read()
+    } catch {
+      return null
+    }
+  }
+
+  async function writeClipboardSafe(content: string): Promise<boolean> {
+    try {
+      await clipboardy.write(content)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // ---------- Session: unlock keys ----------
+
+  async function unlockKeypair(
+    keypair: Keypair,
+    options: { silent?: boolean } = {},
+  ): Promise<openpgp.PrivateKey | null> {
+    const existing = unlockedKeys.get(keypair.fingerprint)
+    if (existing) return existing
+
+    const privateKey = await openpgp.readPrivateKey({
+      armoredKey: keypair.private_key,
+      config: weakKeyConfig,
+    })
+
+    if (!keypair.passphrase_protected) {
+      unlockedKeys.set(keypair.fingerprint, privateKey)
+      return privateKey
+    }
+
+    const cached = getCachedPassphrase(keypair.fingerprint)
+    if (cached) {
+      try {
+        const unlocked = await openpgp.decryptKey({
+          privateKey,
+          passphrase: cached,
+          config: weakKeyConfig,
+        })
+        unlockedKeys.set(keypair.fingerprint, unlocked)
+        return unlocked
+      } catch {
+        if (options.silent) return null
+        showWarning(`Saved passphrase for "${keypair.name}" is invalid.`)
+      }
+    } else if (options.silent) {
+      return null
+    }
+
+    let attempts = 0
+    while (attempts < 3) {
+      attempts++
+      const { passphrase } = await escapeablePrompt<{ passphrase: string }>([
+        {
+          type: 'password',
+          name: 'passphrase',
+          message: promptMessage(`Passphrase for "${keypair.name}":`),
+          mask: '*',
+        },
+      ])
+
+      if (!passphrase) {
+        showWarning('Cancelled.')
+        return null
+      }
+
+      try {
+        const unlocked = await openpgp.decryptKey({
+          privateKey,
+          passphrase,
+          config: weakKeyConfig,
+        })
+        cachePassphrase(keypair.fingerprint, passphrase)
+        unlockedKeys.set(keypair.fingerprint, unlocked)
+        showSuccess('Passphrase saved locally — you won\'t be asked again.')
+        return unlocked
+      } catch {
+        showError('Incorrect passphrase. Try again.')
+      }
+    }
+    return null
+  }
+
+  async function unlockAllCached(): Promise<void> {
+    const keypairs = db.select({ table: 'keypair' })
+    for (const kp of keypairs) {
+      if (kp.passphrase_protected) {
+        await unlockKeypair(kp, { silent: true })
+      } else {
+        await unlockKeypair(kp)
+      }
+    }
+  }
+
+  function getUnlockedPrivateKeys(): openpgp.PrivateKey[] {
+    return Array.from(unlockedKeys.values())
+  }
+
+  // ---------- Encryption ----------
+
+  async function encryptForKeys(
+    message: string,
+    publicKeysArmored: string[],
+  ): Promise<string> {
+    const publicKeys = await Promise.all(
+      publicKeysArmored.map((key) =>
+        openpgp.readKey({ armoredKey: key, config: weakKeyConfig }),
+      ),
+    )
+    const encrypted = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: message }),
+      encryptionKeys: publicKeys,
+      config: weakKeyConfig,
+    })
+    return encrypted as string
+  }
+
+  // ---------- Decryption ----------
+
+  async function decryptWithSession(encryptedMessage: string): Promise<string> {
+    const message = await openpgp.readMessage({
+      armoredMessage: encryptedMessage,
+    })
+
+    const tryWith = async (
+      keys: openpgp.PrivateKey[],
+    ): Promise<string | null> => {
+      if (keys.length === 0) return null
+      try {
+        const { data } = await openpgp.decrypt({
+          message,
+          decryptionKeys: keys,
+          config: weakKeyConfig,
+        })
+        return data as string
+      } catch {
+        return null
+      }
+    }
+
+    const firstTry = await tryWith(getUnlockedPrivateKeys())
+    if (firstTry !== null) {
+      markKeyAsUsed(message)
+      return firstTry
+    }
+
+    const keyIDs = message.getEncryptionKeyIDs()
+    if (keyIDs.length === 0) {
+      throw new Error('Message contains no recipient information')
+    }
+
+    const allKeypairs = db.select({ table: 'keypair' })
+    const matching: Keypair[] = []
+    const seen = new Set<number>()
+    for (const keyID of keyIDs) {
+      const idHex = keyID.toHex().toUpperCase()
+      for (const kp of allKeypairs) {
+        if (seen.has(kp.id)) continue
+        if (kp.fingerprint.toUpperCase().endsWith(idHex)) {
+          matching.push(kp)
+          seen.add(kp.id)
+        }
+      }
+    }
+
+    const locked = matching.filter((kp) => !unlockedKeys.has(kp.fingerprint))
+    if (locked.length === 0) {
+      throw new Error('This message was not encrypted for any of your keys')
+    }
+
+    for (const kp of locked) {
+      showInfo(`Message is encrypted for "${kp.name}" — unlocking…`)
+      const unlocked = await unlockKeypair(kp)
+      if (!unlocked) continue
+      const result = await tryWith([unlocked])
+      if (result !== null) {
+        markKeyAsUsed(message)
+        return result
+      }
+    }
+
+    throw new Error('Could not decrypt with any of your matching keys')
+  }
+
+  function markKeyAsUsed(message: openpgp.Message<string>): void {
+    const keyIDs = message.getEncryptionKeyIDs()
+    if (keyIDs.length === 0) return
+    const allKeypairs = db.select({ table: 'keypair' })
+    for (const keyID of keyIDs) {
+      const idHex = keyID.toHex().toUpperCase()
+      const match = allKeypairs.find(
+        (kp) =>
+          kp.fingerprint.toUpperCase().endsWith(idHex) &&
+          unlockedKeys.has(kp.fingerprint),
+      )
+      if (match) {
+        db.update(
+          'keypair',
+          { key: 'id', value: match.id },
+          { last_used_at: new Date().toISOString() },
+        )
+        return
+      }
+    }
+  }
+
+  // ---------- Auto-save contact (silent) ----------
+
+  async function autoSaveContact(publicKeyArmored: string): Promise<void> {
+    try {
+      const keyInfo = await extractPublicKeyInfo(publicKeyArmored)
+      if (!keyInfo.name || keyInfo.name === 'Unknown') return
+      if (!keyInfo.email || keyInfo.email === 'unknown@example.com') return
+
+      const existing = db.select({
+        table: 'contact',
+        where: {
+          key: 'fingerprint',
+          compare: 'is',
+          value: keyInfo.fingerprint,
+        },
+      })
+      if (existing.length > 0) return
+
+      const ownKey = db.select({
+        table: 'keypair',
+        where: {
+          key: 'fingerprint',
+          compare: 'is',
+          value: keyInfo.fingerprint,
+        },
+      })
+      if (ownKey.length > 0) return
+
+      db.insert('contact', {
+        name: keyInfo.name,
+        email: keyInfo.email,
+        fingerprint: keyInfo.fingerprint,
+        public_key: publicKeyArmored,
+        algorithm: keyInfo.algorithm,
+        key_size: keyInfo.keySize,
+        trusted: false,
+        last_verified_at: null,
+        notes: null,
+        expires_at: keyInfo.expiresAt,
+        revoked: false,
+      })
+      showInfo(`Saved "${keyInfo.name}" to contacts.`)
+    } catch {
+      // Silently skip on any failure
+    }
+  }
+
+  // ---------- Message input methods ----------
+
+  type InputResult = { value: string } | { cancelled: true }
+
+  async function chooseInputMethod(
+    promptText: string,
+    skipClipboard = false,
+  ): Promise<InputResult> {
+    const availableEditors = detectAvailableEditors()
+
+    while (true) {
+      const inputChoices: { name: string; value: string }[] = []
+      if (!skipClipboard) {
+        inputChoices.push({
+          name: `${icons.clipboard} Paste from clipboard`,
+          value: 'clipboard',
+        })
+      }
+      if (availableEditors.length > 0) {
+        inputChoices.push({
+          name: `${icons.editor} Open in an editor`,
+          value: 'editor',
+        })
+      }
+      inputChoices.push({
+        name: `${icons.inline} Type inline ${colors.muted('(Ctrl+D when done)')}`,
+        value: 'inline',
+      })
+      const choices: any[] = [
+        ...inputChoices,
+        new inquirer.Separator(),
+        mainMenuChoice(),
+      ]
+
+      const { inputMethod } = await escapeablePrompt<{ inputMethod: string }>([
+        {
+          type: 'list',
+          name: 'inputMethod',
+          message: promptMessage(promptText),
+          choices,
+        },
+      ])
+
+      if (inputMethod === 'main-menu') return { cancelled: true }
+
+      if (inputMethod === 'clipboard') {
+        const content = await readClipboardSafe()
+        if (!content || content.trim() === '') {
+          showError('Clipboard is empty.')
+          continue
+        }
+        return { value: content }
+      }
+
+      if (inputMethod === 'editor') {
+        const editorChoices: any[] = availableEditors.map((e) => ({
+          name: `${icons.editor} ${e.name} ${colors.muted(`(${getEditorInstructions(e.command)})`)}`,
+          value: e.command,
+        }))
+        editorChoices.push(
+          new inquirer.Separator(),
+          backChoice(),
+          mainMenuChoice(),
+        )
+
+        const { selectedEditor } = await escapeablePrompt<{
+          selectedEditor: string
+        }>([
+          {
+            type: 'list',
+            name: 'selectedEditor',
+            message: promptMessage('Choose your editor:'),
+            choices: editorChoices,
+          },
+        ])
+
+        if (selectedEditor === 'back') continue
+        if (selectedEditor === 'main-menu') return { cancelled: true }
+
+        const originalEditor = process.env.EDITOR
+        const originalVisual = process.env.VISUAL
+        process.env.EDITOR = selectedEditor
+        process.env.VISUAL = selectedEditor
+
+        try {
+          const { editorInput } = await escapeablePrompt<{
+            editorInput: string
+          }>([
+            {
+              type: 'editor',
+              name: 'editorInput',
+              message: promptMessage('Press Enter to open editor:'),
+              postfix: '.txt',
+              waitForUseInput: false,
+            },
+          ])
+          return { value: editorInput ?? '' }
+        } finally {
+          if (originalEditor !== undefined) process.env.EDITOR = originalEditor
+          else delete process.env.EDITOR
+          if (originalVisual !== undefined) process.env.VISUAL = originalVisual
+          else delete process.env.VISUAL
+        }
+      }
+
+      if (inputMethod === 'inline') {
+        try {
+          const value = await readInlineMultiline('Type your message:')
+          return { value }
+        } catch (error) {
+          if (error instanceof EscapeError) return { cancelled: true }
+          throw error
+        }
+      }
+    }
+  }
+
+  // ---------- Recipient selection ----------
+
+  type Recipient = {
+    name: string
+    publicKey: string
+    isNew: boolean
+  }
+
+  async function getRecipientFromPaste(): Promise<Recipient | null> {
+    let value: string
+    try {
+      value = await readInlineMultiline(
+        "Paste the recipient's PGP PUBLIC KEY block:",
+        '(Paste, then press Ctrl+D)',
+      )
+    } catch (error) {
+      if (error instanceof EscapeError) return null
+      throw error
+    }
+
+    if (!value.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
+      showError('No PGP public key found in the input.')
+      return null
+    }
+
+    const keys = extractAllPublicKeys(value)
+    if (keys.length === 0) {
+      showError('No valid PGP public key block found.')
+      return null
+    }
+
+    try {
+      const armored = keys[0]!
+      await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
+      const info = await extractPublicKeyInfo(armored)
+      const name = formatMaskedRecipient(info)
+      return { name, publicKey: armored, isNew: true }
+    } catch (error) {
+      showError(
+        `Failed to read public key: ${error instanceof Error ? error.message : error}`,
+      )
+      return null
+    }
+  }
+
+  async function selectMultipleRecipients(): Promise<Recipient[]> {
+    const recipients: Recipient[] = []
+    const contacts = db.select({ table: 'contact' })
+    const defaultKeypair = keyManager.getDefaultKeypair()
+
+    while (true) {
+      const choices: any[] = []
+      if (recipients.length > 0) {
+        choices.push({
+          name: colors.primary(
+            `── Current recipients: ${recipients.length} ──`,
+          ),
+          value: 'show',
+        })
+      }
+      if (defaultKeypair && !recipients.some((r) => r.name === 'Myself')) {
+        choices.push({
+          name: `${icons.key} Add myself ${colors.muted('(so you can decrypt too)')}`,
+          value: 'self',
+        })
+      }
+      if (contacts.length > 0) {
+        choices.push({
+          name: `${icons.contact} Pick from contacts ${colors.muted(`(${contacts.length})`)}`,
+          value: 'contacts',
+        })
+      }
+      choices.push(
+        { name: `${icons.clipboard} Add from clipboard`, value: 'clipboard' },
+        { name: `${icons.inline} Paste a public key`, value: 'paste' },
+        new inquirer.Separator(),
+        {
+          name:
+            recipients.length > 0
+              ? `${icons.success} Done`
+              : `${icons.back} Cancel`,
+          value: 'done',
+        },
+      )
+
+      const { method } = await escapeablePrompt<{ method: string }>([
+        {
+          type: 'list',
+          name: 'method',
+          message: promptMessage('Add recipients:'),
+          choices,
+        },
+      ])
+
+      if (method === 'done') break
+
+      if (method === 'show') {
+        console.log(colors.primary('\nCurrent recipients:'))
+        for (const r of recipients) console.log(colors.muted(`   • ${r.name}`))
+        console.log()
+        continue
+      }
+
+      if (method === 'self') {
+        if (defaultKeypair) {
+          recipients.push({
+            name: 'Myself',
+            publicKey: defaultKeypair.public_key,
+            isNew: false,
+          })
+          showSuccess('Added yourself')
+        }
+        continue
+      }
+
+      if (method === 'contacts') {
+        const { selected } = await escapeablePrompt<{ selected: number[] }>([
+          {
+            type: 'checkbox',
+            name: 'selected',
+            message: promptMessage('Select contacts:'),
+            choices: contacts.map((c) => {
+              const already = recipients.some(
+                (r) => r.publicKey === c.public_key,
+              )
+              return {
+                name: `${c.name} <${c.email}>${already ? colors.muted(' (added)') : ''}`,
+                value: c.id,
+                disabled: already,
+              }
+            }),
+          },
+        ])
+        for (const id of selected) {
+          const c = contacts.find((x) => x.id === id)
+          if (c) {
+            recipients.push({
+              name: formatMaskedRecipient({
+                name: c.name,
+                email: c.email,
+                fingerprint: c.fingerprint,
+              }),
+              publicKey: c.public_key,
+              isNew: false,
+            })
+          }
+        }
+        continue
+      }
+
+      if (method === 'clipboard') {
+        const content = await readClipboardSafe()
+        const keys = content ? extractAllPublicKeys(content) : []
+        if (keys.length === 0) {
+          showWarning('No public keys found in clipboard.')
+          continue
+        }
+        for (const armored of keys) {
+          try {
+            await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
+            const info = await extractPublicKeyInfo(armored)
+            const name = formatMaskedRecipient(info)
+            if (recipients.some((r) => r.publicKey === armored)) {
+              showWarning(`Skipping duplicate: ${name}`)
+              continue
+            }
+            recipients.push({ name, publicKey: armored, isNew: true })
+            showSuccess(`Added ${name}`)
+          } catch (error) {
+            showError(`Skipped invalid key: ${error}`)
+          }
+        }
+        continue
+      }
+
+      if (method === 'paste') {
+        const r = await getRecipientFromPaste()
+        if (r) {
+          if (recipients.some((x) => x.publicKey === r.publicKey)) {
+            showWarning('Already added.')
+          } else {
+            recipients.push(r)
+            showSuccess(`Added ${r.name}`)
+          }
+        }
+      }
+    }
+
+    return recipients
+  }
+
+  // ---------- Actions ----------
+
+  async function actionCopyPublicKey(): Promise<void> {
+    const keypairs = db.select({ table: 'keypair' })
+    if (keypairs.length === 0) {
+      showError('No keypairs found. Create one from the key management menu.')
+      await pause()
+      return
+    }
+
+    let selected: Keypair
+    if (keypairs.length === 1) {
+      selected = keypairs[0]!
+    } else {
+      const defaultId = keypairs.find((kp) => kp.is_default)?.id
+      const { keypairId } = await escapeablePrompt<{
+        keypairId: number | string
+      }>([
+        {
+          type: 'list',
+          name: 'keypairId',
+          message: promptMessage('Which public key would you like to copy?'),
+          default: defaultId,
+          choices: [
+            ...keypairs.map((kp) => ({
+              name: `${icons.key} ${kp.name}${kp.is_default ? ` ${colors.muted('(default)')}` : ''}`,
+              value: kp.id,
+            })),
+            new inquirer.Separator(),
+            mainMenuChoice(),
+          ],
+        },
+      ])
+      if (keypairId === 'main-menu') return
+      const found = keypairs.find((kp) => kp.id === keypairId)
+      if (!found) return
+      selected = found
+    }
+
+    const ok = await writeClipboardSafe(selected.public_key)
+    console.log()
+    if (ok) {
+      showSuccess(`Public key for "${selected.name}" copied to clipboard.`)
+      console.log(
+        colors.muted(`  Fingerprint: ${selected.fingerprint.slice(-16)}`),
+      )
+    } else {
+      showError('Could not write to clipboard.')
+    }
+    console.log()
+    await pause()
+  }
+
+  async function actionEncrypt(): Promise<void> {
+    let recipients: Recipient[] = []
+
+    // 1. Auto-detect a public key in clipboard
+    const clipboard = await readClipboardSafe()
+    const clipboardKeys = clipboard ? extractAllPublicKeys(clipboard) : []
+
+    if (clipboardKeys.length === 1) {
+      const armored = clipboardKeys[0]!
+      try {
+        await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
+        const info = await extractPublicKeyInfo(armored)
+        const masked = formatMaskedRecipient(info)
+
+        const { useClipboard } = await escapeablePrompt<{
+          useClipboard: boolean
+        }>([
+          {
+            type: 'confirm',
+            name: 'useClipboard',
+            message: promptMessage(
+              `Encrypt for ${colors.successBold(masked)}?`,
+            ),
+            default: true,
+          },
+        ])
+
+        if (useClipboard) {
+          recipients = [{ name: masked, publicKey: armored, isNew: true }]
+        }
+      } catch {
+        // Bad key, fall through to picker
+      }
+    }
+
+    // 2. If no clipboard recipient, show picker
+    if (recipients.length === 0) {
+      const contacts = db.select({ table: 'contact' })
+      const defaultKeypair = keyManager.getDefaultKeypair()
+
+      const choices: any[] = []
+      if (contacts.length > 0) {
+        choices.push({
+          name: `${icons.contact} A saved contact ${colors.muted(`(${contacts.length})`)}`,
+          value: 'contact',
+        })
+      }
+      choices.push({
+        name: `${icons.inline} Paste a public key`,
+        value: 'paste',
+      })
+      choices.push({
+        name: `${icons.multiple} Multiple recipients`,
+        value: 'multi',
+      })
+      if (defaultKeypair) {
+        choices.push({
+          name: `${icons.key} Myself`,
+          value: 'self',
+        })
+      }
+      choices.push(new inquirer.Separator(), mainMenuChoice())
+
+      const { recipient } = await escapeablePrompt<{ recipient: string }>([
+        {
+          type: 'list',
+          name: 'recipient',
+          message: promptMessage('Who do you want to encrypt for?'),
+          choices,
+        },
+      ])
+
+      if (recipient === 'main-menu') return
+
+      if (recipient === 'contact') {
+        const { contactId } = await escapeablePrompt<{
+          contactId: number | string
+        }>([
+          {
+            type: 'list',
+            name: 'contactId',
+            message: promptMessage('Select contact:'),
+            choices: [
+              ...contacts.map((c) => ({
+                name: `${icons.contact} ${c.name} ${colors.muted(`<${c.email}>`)}`,
+                value: c.id,
+              })),
+              new inquirer.Separator(),
+              backChoice(),
+            ],
+          },
+        ])
+        if (contactId === 'back') return actionEncrypt()
+        const c = contacts.find((x) => x.id === contactId)
+        if (!c) return
+        recipients = [
+          {
+            name: formatMaskedRecipient({
+              name: c.name,
+              email: c.email,
+              fingerprint: c.fingerprint,
+            }),
+            publicKey: c.public_key,
+            isNew: false,
+          },
+        ]
+      } else if (recipient === 'paste') {
+        const r = await getRecipientFromPaste()
+        if (!r) return
+        recipients = [r]
+      } else if (recipient === 'multi') {
+        recipients = await selectMultipleRecipients()
+        if (recipients.length === 0) return
+      } else if (recipient === 'self') {
+        if (defaultKeypair) {
+          recipients = [
+            {
+              name: 'Myself',
+              publicKey: defaultKeypair.public_key,
+              isNew: false,
+            },
+          ]
+        }
+      }
+    }
+
+    if (recipients.length === 0) return
+
+    if (recipients.length > 1) {
+      console.log(colors.primary('\nEncrypting for:'))
+      for (const r of recipients) console.log(colors.muted(`  • ${r.name}`))
+      console.log()
+    }
+
+    // 3. Get message
+    const result = await chooseInputMethod(
+      'How would you like to enter your message?',
+    )
+    if ('cancelled' in result) return
+    const message = result.value
+    if (!message || message.trim() === '') {
+      showError('No message provided.')
+      await pause()
+      return
+    }
+
+    // 4. Encrypt
+    showLoading('Encrypting…')
+    const encrypted = await encryptForKeys(
+      message,
+      recipients.map((r) => r.publicKey),
+    )
+
+    // 5. Display + copy
+    console.clear()
+    printBanner()
+    console.log(colors.successBold('Encrypted Message:\n'))
+    printDivider()
+    console.log(encrypted)
+    printDivider()
+    console.log()
+
+    const copied = await writeClipboardSafe(encrypted)
+    if (copied) {
+      showSuccess('Encrypted message copied to clipboard.')
+    } else {
+      showWarning('Clipboard unavailable.')
+    }
+
+    // 6. Auto-save new contacts (silent if name available)
+    for (const r of recipients) {
+      if (r.isNew) {
+        await autoSaveContact(r.publicKey)
+      }
+    }
+
+    console.log()
+    await pause()
+  }
+
+  async function actionDecrypt(): Promise<void> {
+    let encrypted: string | null = null
+
+    // 1. Auto-detect clipboard
+    const clipboard = await readClipboardSafe()
+    if (clipboard && clipboard.includes('BEGIN PGP MESSAGE')) {
+      const { useClipboard } = await escapeablePrompt<{
+        useClipboard: boolean
+      }>([
+        {
+          type: 'confirm',
+          name: 'useClipboard',
+          message: promptMessage(
+            'Encrypted message detected in clipboard. Use it?',
+          ),
+          default: true,
+        },
+      ])
+      if (useClipboard) encrypted = clipboard
+    }
+
+    // 2. Fall back to input method picker
+    if (!encrypted) {
+      const result = await chooseInputMethod(
+        'How would you like to enter the encrypted message?',
+      )
+      if ('cancelled' in result) return
+      encrypted = result.value
+    }
+
+    if (!encrypted || !encrypted.includes('BEGIN PGP MESSAGE')) {
+      showError('No PGP message found.')
+      await pause()
+      return
+    }
+
+    // 3. Decrypt
+    showLoading('Decrypting…')
+    try {
+      const plaintext = await decryptWithSession(encrypted)
+
+      console.clear()
+      printBanner()
+      console.log(colors.successBold('Decrypted Message:\n'))
+      printDivider()
+      console.log(plaintext)
+      printDivider()
+      console.log()
+
+      const copied = await writeClipboardSafe(plaintext)
+      if (copied) showSuccess('Decrypted message copied to clipboard.')
+      console.log()
+      await pause()
+    } catch (error) {
+      if (error instanceof EscapeError) throw error
+      const msg = error instanceof Error ? error.message : String(error)
+      console.log()
+      showError(`Decryption failed: ${msg}`)
+      console.log()
+      await pause()
+    }
+  }
+
+  async function pause(): Promise<void> {
+    await escapeablePrompt([
+      {
+        type: 'input',
+        name: 'continue',
+        message: colors.muted('Press Enter to continue…'),
+      },
+    ])
+  }
+
+  // ---------- Main menu ----------
+
+  async function showMainMenu(): Promise<void> {
+    printBanner()
+    const defaultKp = keyManager.getDefaultKeypair()
+    printHomeStatus(defaultKp ? `${defaultKp.name} key` : null)
+
+    const menuChoices: any[] = [
+      { name: `${icons.clipboard} Copy my public key`, value: 'copy' },
+      { name: `${icons.decrypt} Decrypt a message`, value: 'decrypt' },
+      { name: `${icons.encrypt} Encrypt a message`, value: 'encrypt' },
+      new inquirer.Separator(colors.muted('  ─────────')),
+      { name: `${icons.key} Manage keys & contacts`, value: 'keys' },
+      exitChoice(),
+    ]
+
+    const { action } = await escapeablePrompt<{ action: string }>([
+      {
+        type: 'list',
+        name: 'action',
+        message: promptMessage('Choose an action'),
+        choices: menuChoices,
+      },
+    ])
+
+    if (action === 'exit') {
+      clearSession()
+      console.clear()
+      process.exit(0)
+    }
+
+    if (action === 'keys') {
+      await keyManager.showKeyManagementMenu()
+      return
+    }
+
+    if (action === 'copy') {
+      await actionCopyPublicKey()
+      return
+    }
+
+    if (action === 'encrypt') {
+      await actionEncrypt()
+      return
+    }
+
+    if (action === 'decrypt') {
+      await actionDecrypt()
+      return
+    }
+  }
+
+  function clearSession(): void {
+    unlockedKeys.clear()
+  }
+
+  // ---------- Bootstrap ----------
+
+  async function main(): Promise<void> {
     if (!db) {
       db = await Db.init()
       keyManager = new KeyManager(db)
@@ -866,753 +1154,39 @@ function startInteractiveMode(): void {
 
     printBanner()
 
-    // Check for default keypair on first run
-    const hasKeypair = await keyManager.hasDefaultKeypair()
+    const hasKeypair = keyManager.hasDefaultKeypair()
     if (!hasKeypair) {
       console.log()
       showWarning("No keypair found. Let's set up your first keypair.")
       console.log()
       await keyManager.setupFirstKeypair()
       console.log()
-      showSuccess('Setup complete! You can now use the tool.')
+      showSuccess('Setup complete!')
       console.log()
     }
 
-    // Build menu choices
-    const menuChoices: any[] = [
-      { name: `${icons.encrypt} Encrypt a message`, value: 'encrypt' },
-      { name: `${icons.decrypt} Decrypt a message`, value: 'decrypt' },
-      { name: `${icons.key} Manage keys`, value: 'keys' },
-    ]
-
-    // Check if installed globally and if update is available
-    const installedVersion = getInstalledVersion()
-    const latestVersion = getLatestVersion()
-
-    if (!installedVersion) {
-      // Not installed globally - offer to install
-      menuChoices.push(new inquirer.Separator())
-      menuChoices.push({
-        name: `${icons.add} Install lpgp globally ${colors.muted('(for offline use)')}`,
-        value: 'install',
-      })
-    } else if (
-      latestVersion &&
-      isOlderVersion(installedVersion, latestVersion)
+    // Unlock default key up front if not already cached
+    const defaultKp = keyManager.getDefaultKeypair()
+    if (
+      defaultKp &&
+      defaultKp.passphrase_protected &&
+      !unlockedKeys.has(defaultKp.fingerprint)
     ) {
-      // Installed but outdated - offer to update
-      menuChoices.push(new inquirer.Separator())
-      menuChoices.push({
-        name: `${icons.add} Update lpgp ${colors.muted(`(${installedVersion} → ${latestVersion})`)}`,
-        value: 'update',
-      })
-    }
-
-    menuChoices.push(new inquirer.Separator())
-    menuChoices.push(exitChoice())
-
-    const { action } = await escapeablePrompt([
-      {
-        type: 'list',
-        name: 'action',
-        message: promptMessage('What would you like to do?'),
-        choices: menuChoices,
-      },
-    ])
-
-    if (action === 'exit') {
-      clearPassphraseCache()
-      console.clear()
-      process.exit(0)
-    }
-
-    if (action === 'install' || action === 'update') {
-      await installOrUpdateGlobally(action === 'update')
-      await escapeablePrompt([
-        {
-          type: 'input',
-          name: 'continue',
-          message: promptMessage('Press Enter to continue...'),
-        },
-      ])
-      return main()
-    }
-
-    if (action === 'keys') {
-      await keyManager.showKeyManagementMenu()
-      return main()
-    }
-
-    if (action === 'encrypt') {
-      try {
-        // Ask who to encrypt for
-        const { recipient } = await escapeablePrompt([
-          {
-            type: 'list',
-            name: 'recipient',
-            message: promptMessage(
-              'Who do you want to encrypt this message for?'
-            ),
-            choices: [
-              {
-                name: `${icons.contact} Someone else ${colors.muted('(use their public key)')}`,
-                value: 'other',
-              },
-              {
-                name: `${icons.multiple} Multiple recipients`,
-                value: 'multiple',
-              },
-              {
-                name: `${icons.key} Myself ${colors.muted('(use my public key)')}`,
-                value: 'self',
-              },
-              new inquirer.Separator(),
-              mainMenuChoice(),
-            ],
-          },
-        ])
-
-        if (recipient === 'back' || recipient === 'main-menu') {
-          return main()
-        }
-
-        let recipientPublicKeys: string[] = []
-        let recipientNames: string[] = []
-        let isNewContact = false
-
-        // Handle multiple recipients
-        if (recipient === 'multiple') {
-          const recipients = await selectMultipleRecipients()
-          if (recipients.length === 0) {
-            console.log()
-            showError('No recipients selected. Aborting.')
-            console.log()
-            return main()
-          }
-          recipientPublicKeys = recipients.map((r) => r.publicKey)
-          recipientNames = recipients.map((r) => r.name)
-
-          // Show summary
-          console.log(
-            colors.primary('\nEncrypting for the following recipients:')
-          )
-          for (const name of recipientNames) {
-            console.log(colors.muted(`   • ${name}`))
-          }
-          console.log()
-        } else if (recipient === 'other') {
-          // Check if there are any saved contacts
-          const contacts = db.select({ table: 'contact' })
-
-          // Loop for recipient selection (allows going back from contacts submenu)
-          recipientLoop: while (true) {
-            // Build main menu choices
-            const recipientChoices: any[] = []
-
-            if (contacts.length > 0) {
-              recipientChoices.push({
-                name: `${icons.contact} Saved contacts ${colors.muted(`(${contacts.length} available)`)}`,
-                value: 'saved-contacts',
-              })
-            }
-
-            recipientChoices.push(
-              { name: `${icons.add} Use a new public key`, value: 'new' },
-              new inquirer.Separator(),
-              mainMenuChoice()
-            )
-
-            const { recipientSource } = await escapeablePrompt([
-              {
-                type: 'list',
-                name: 'recipientSource',
-                message: promptMessage(
-                  'How would you like to specify the recipient?'
-                ),
-                choices: recipientChoices,
-              },
-            ])
-
-            if (recipientSource === 'main' || recipientSource === 'main-menu') {
-              return main()
-            }
-
-            if (recipientSource === 'saved-contacts') {
-              // Show contacts submenu
-              const contactChoices: any[] = contacts.map((c) => ({
-                name: `${icons.contact} ${c.name} ${colors.muted(`<${c.email}>`)}`,
-                value: c.id,
-              }))
-              contactChoices.push(
-                new inquirer.Separator(),
-                backChoice(),
-                mainMenuChoice(),
-                new inquirer.Separator()
-              )
-
-              const { contactChoice } = await escapeablePrompt([
-                {
-                  type: 'list',
-                  name: 'contactChoice',
-                  message: promptMessage('Select a contact:'),
-                  choices: contactChoices,
-                },
-              ])
-
-              if (contactChoice === 'main' || contactChoice === 'main-menu') {
-                return main()
-              }
-
-              if (contactChoice === 'back') {
-                // Go back to recipient source selection
-                continue recipientLoop
-              }
-
-              // Use saved contact
-              const selectedContact = contacts.find(
-                (c) => c.id === contactChoice
-              )
-              if (selectedContact) {
-                recipientPublicKeys = [selectedContact.public_key]
-                break recipientLoop
-              }
-            } else if (recipientSource === 'new') {
-              const publicKey = await getRecipientPublicKey()
-              if (!publicKey) {
-                console.log()
-                showError('Could not get recipient public key. Aborting.')
-                console.log()
-                return main()
-              }
-              recipientPublicKeys = [publicKey]
-              isNewContact = true
-              break recipientLoop
-            }
-          }
-        }
-
-        // Detect available editors
-        const availableEditors = detectAvailableEditors()
-
-        let message: string | undefined
-
-        // Loop for input method selection (allows going back from editor selection)
-        inputMethodLoop: while (true) {
-          // Ask for input method
-          const inputChoices: any[] = []
-
-          // Always add clipboard option first
-          inputChoices.push({
-            name: `${icons.clipboard} Paste from clipboard`,
-            value: 'clipboard',
-          })
-
-          if (availableEditors.length > 0) {
-            inputChoices.push(
-              { name: `${icons.editor} Use an editor`, value: 'editor' },
-              {
-                name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`,
-                value: 'inline',
-              }
-            )
-          } else {
-            inputChoices.push({
-              name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`,
-              value: 'inline',
-            })
-          }
-
-          // Add main menu option
-          inputChoices.push(new inquirer.Separator(), mainMenuChoice())
-
-          const { inputMethod } = await escapeablePrompt([
-            {
-              type: 'list',
-              name: 'inputMethod',
-              message: promptMessage(
-                'How would you like to enter your message?'
-              ),
-              choices: inputChoices,
-            },
-          ])
-
-          if (inputMethod === 'back' || inputMethod === 'main-menu') {
-            return main()
-          }
-
-          if (inputMethod === 'clipboard') {
-            try {
-              message = await clipboardy.read()
-              if (!message || message.trim() === '') {
-                console.log()
-                showError('Clipboard is empty.')
-                console.log()
-                return main()
-              }
-              console.log()
-              showSuccess('Message loaded from clipboard')
-              console.log()
-              break inputMethodLoop
-            } catch (clipError) {
-              console.log()
-              showError(`Failed to read from clipboard: ${clipError}`)
-              return main()
-            }
-          } else if (inputMethod === 'editor') {
-            // Let user choose editor
-            const editorChoices: any[] = availableEditors.map((e) => ({
-              name: `${icons.editor} ${e.name} ${colors.muted(`(${getEditorInstructions(e.command)})`)}`,
-              value: e.command,
-            }))
-            editorChoices.push(
-              new inquirer.Separator(),
-              backChoice(),
-              mainMenuChoice()
-            )
-
-            const { selectedEditor } = await escapeablePrompt([
-              {
-                type: 'list',
-                name: 'selectedEditor',
-                message: promptMessage('Choose your editor:'),
-                choices: editorChoices,
-              },
-            ])
-
-            if (selectedEditor === 'back') {
-              // Re-ask for input method
-              continue inputMethodLoop
-            }
-            if (selectedEditor === 'main-menu') {
-              return main()
-            }
-
-            // Set the EDITOR environment variable before opening inquirer editor
-            const originalEditor = process.env.EDITOR
-            const originalVisual = process.env.VISUAL
-            process.env.EDITOR = selectedEditor
-            process.env.VISUAL = selectedEditor
-            const editorName =
-              availableEditors.find((e) => e.command === selectedEditor)
-                ?.name || 'editor'
-
-            console.log(
-              colors.muted(
-                '\nNote: The temp file is automatically deleted after encryption.\n'
-              )
-            )
-
-            try {
-              const { editorInput } = await escapeablePrompt([
-                {
-                  type: 'editor',
-                  name: 'editorInput',
-                  message: promptMessage(`Press Enter to open ${editorName}:`),
-                  postfix: '.txt',
-                  waitForUseInput: false,
-                },
-              ])
-
-              message = editorInput
-              break inputMethodLoop
-            } finally {
-              // Restore original environment variables
-              if (originalEditor !== undefined) {
-                process.env.EDITOR = originalEditor
-              } else {
-                delete process.env.EDITOR
-              }
-              if (originalVisual !== undefined) {
-                process.env.VISUAL = originalVisual
-              } else {
-                delete process.env.VISUAL
-              }
-            }
-          } else {
-            message = await readInlineMultilineInput('Enter your message:')
-            break inputMethodLoop
-          }
-        }
-
-        if (!message || message.trim() === '') {
-          console.log()
-          showError('No message provided. Aborting.')
-          console.log()
-          return main()
-        }
-
+      const unlocked = await unlockKeypair(defaultKp)
+      if (!unlocked) {
+        showWarning('No passphrase provided. Decryption will be unavailable.')
         console.log()
-        showLoading('Encrypting message...')
-        console.log()
-        const encrypted = await encryptMessage(
-          message,
-          recipientPublicKeys.length > 0 ? recipientPublicKeys : undefined
-        )
-
-        // Clear screen, show encrypted message, then clipboard status
-        console.clear()
-        printBanner()
-
-        console.log(colors.successBold('Encrypted Message:\n'))
-        printDivider()
-        console.log(encrypted)
-        printDivider()
-
-        // Copy to clipboard and show status below the message
-        try {
-          await clipboardy.write(encrypted)
-          console.log()
-          showSuccess('Encrypted message copied to clipboard')
-          console.log()
-        } catch (clipError) {
-          console.log()
-          showWarning('Clipboard unavailable')
-          console.log()
-        }
-
-        // Offer to save the contact if it's a new public key (single recipient only)
-        const newPublicKey = recipientPublicKeys[0]
-        if (
-          isNewContact &&
-          newPublicKey !== undefined &&
-          recipientPublicKeys.length === 1
-        ) {
-          const { saveContact } = await escapeablePrompt([
-            {
-              type: 'confirm',
-              name: 'saveContact',
-              message: promptMessage(
-                'Would you like to save this contact for future use?'
-              ),
-              default: true,
-            },
-          ])
-
-          if (saveContact) {
-            try {
-              // Extract key information
-              const keyInfo = await extractPublicKeyInfo(newPublicKey)
-
-              // Prompt for contact name
-              const defaultName =
-                (keyInfo.email || 'unknown').split('@')[0] || 'Contact'
-              const answers = await escapeablePrompt([
-                {
-                  type: 'input',
-                  name: 'contactName',
-                  message: promptMessage('Contact name:'),
-                  default: defaultName,
-                  validate: (input: string) =>
-                    input.trim().length > 0 || 'Name cannot be empty',
-                },
-              ])
-              const contactName = answers.contactName as string
-
-              // Check if contact already exists by fingerprint
-              const existingContacts = db.select({
-                table: 'contact',
-                where: {
-                  key: 'fingerprint',
-                  compare: 'is',
-                  value: keyInfo.fingerprint,
-                },
-              })
-
-              if (existingContacts.length > 0) {
-                console.log()
-                showWarning('This contact already exists.')
-                console.log()
-              } else {
-                // Save the contact
-                db.insert('contact', {
-                  name: contactName.trim(),
-                  email: keyInfo.email,
-                  fingerprint: keyInfo.fingerprint,
-                  public_key: newPublicKey,
-                  algorithm: keyInfo.algorithm,
-                  key_size: keyInfo.keySize,
-                  trusted: false,
-                  last_verified_at: null,
-                  notes: null,
-                  expires_at: keyInfo.expiresAt,
-                  revoked: false,
-                })
-
-                console.log()
-                showSuccess(`Contact "${contactName}" saved successfully!`)
-                console.log()
-              }
-            } catch (error) {
-              console.log()
-              showError(
-                `Failed to save contact: ${error instanceof Error ? error.message : error}`
-              )
-            }
-          }
-        }
-      } catch (error) {
-        // Re-throw escape errors to be handled by the main loop
-        if (error instanceof EscapeError) throw error
-        console.log()
-        showError(
-          `Encryption failed: ${error instanceof Error ? error.message : error}`
-        )
-      }
-    } else if (action === 'decrypt') {
-      try {
-        // Detect available editors
-        const availableEditors = detectAvailableEditors()
-
-        let encrypted: string | undefined
-
-        // Loop for input method selection (allows going back from editor selection)
-        decryptInputLoop: while (true) {
-          // Ask for input method
-          const inputChoices: any[] = []
-
-          // Always add clipboard option first
-          inputChoices.push({
-            name: `${icons.clipboard} Paste from clipboard`,
-            value: 'clipboard',
-          })
-
-          if (availableEditors.length > 0) {
-            inputChoices.push(
-              { name: `${icons.editor} Use an editor`, value: 'editor' },
-              {
-                name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`,
-                value: 'inline',
-              }
-            )
-          } else {
-            inputChoices.push({
-              name: `${icons.inline} Type inline ${colors.muted('(Enter, then Ctrl+D to finish)')}`,
-              value: 'inline',
-            })
-          }
-
-          // Add main menu option
-          inputChoices.push(new inquirer.Separator(), mainMenuChoice())
-
-          const { inputMethod } = await escapeablePrompt([
-            {
-              type: 'list',
-              name: 'inputMethod',
-              message: promptMessage(
-                'How would you like to enter the encrypted message?'
-              ),
-              choices: inputChoices,
-            },
-          ])
-
-          if (inputMethod === 'back' || inputMethod === 'main-menu') {
-            return main()
-          }
-
-          if (inputMethod === 'clipboard') {
-            try {
-              encrypted = await clipboardy.read()
-              if (!encrypted || encrypted.trim() === '') {
-                console.log()
-                showError('Clipboard is empty.')
-                console.log()
-                return main()
-              }
-              console.log()
-              showSuccess('Encrypted message loaded from clipboard')
-              console.log()
-              break decryptInputLoop
-            } catch (clipError) {
-              console.log()
-              showError(`Failed to read from clipboard: ${clipError}`)
-              return main()
-            }
-          } else if (inputMethod === 'editor') {
-            // Let user choose editor
-            const editorChoices: any[] = availableEditors.map((e) => ({
-              name: `${icons.editor} ${e.name} ${colors.muted(`(${getEditorInstructions(e.command)})`)}`,
-              value: e.command,
-            }))
-            editorChoices.push(
-              new inquirer.Separator(),
-              backChoice(),
-              mainMenuChoice()
-            )
-
-            const { selectedEditor } = await escapeablePrompt([
-              {
-                type: 'list',
-                name: 'selectedEditor',
-                message: promptMessage('Choose your editor:'),
-                choices: editorChoices,
-              },
-            ])
-
-            if (selectedEditor === 'back') {
-              // Re-ask for input method
-              continue decryptInputLoop
-            }
-            if (selectedEditor === 'main-menu') {
-              return main()
-            }
-
-            // Set the EDITOR environment variable before opening inquirer editor
-            const originalEditor = process.env.EDITOR
-            const originalVisual = process.env.VISUAL
-            process.env.EDITOR = selectedEditor
-            process.env.VISUAL = selectedEditor
-            const editorName =
-              availableEditors.find((e) => e.command === selectedEditor)
-                ?.name || 'editor'
-
-            console.log(
-              colors.muted(
-                '\nNote: The temp file is automatically deleted after decryption.\n'
-              )
-            )
-
-            try {
-              const { editorInput } = await escapeablePrompt([
-                {
-                  type: 'editor',
-                  name: 'editorInput',
-                  message: promptMessage(`Press Enter to open ${editorName}:`),
-                  postfix: '.txt',
-                  waitForUseInput: false,
-                },
-              ])
-
-              encrypted = editorInput
-              break decryptInputLoop
-            } finally {
-              // Restore original environment variables
-              if (originalEditor !== undefined) {
-                process.env.EDITOR = originalEditor
-              } else {
-                delete process.env.EDITOR
-              }
-              if (originalVisual !== undefined) {
-                process.env.VISUAL = originalVisual
-              } else {
-                delete process.env.VISUAL
-              }
-            }
-          } else {
-            encrypted = await readInlineMultilineInput(
-              'Paste the encrypted message:'
-            )
-            break decryptInputLoop
-          }
-        }
-
-        if (!encrypted || encrypted.trim() === '') {
-          console.log()
-          showError('No encrypted message provided. Aborting.')
-          console.log()
-          return main()
-        }
-
-        console.log()
-        showLoading('Decrypting message...')
-        console.log()
-        const decrypted = await decryptMessage(encrypted)
-
-        // Clear screen, show decrypted message, then clipboard status
-        console.clear()
-        printBanner()
-
-        console.log(colors.successBold('Decrypted Message:\n'))
-        printDivider()
-        console.log(decrypted)
-        printDivider()
-
-        // Copy to clipboard and show status below the message
-        try {
-          await clipboardy.write(decrypted)
-          console.log()
-          showSuccess('Decrypted message copied to clipboard')
-          console.log()
-        } catch (clipError) {
-          console.log()
-          showWarning('Clipboard unavailable')
-          console.log()
-        }
-
-        // Wait for user to press Enter before continuing
-        await escapeablePrompt([
-          {
-            type: 'input',
-            name: 'continue',
-            message: colors.muted('Press Enter to continue...'),
-          },
-        ])
-      } catch (error) {
-        // Re-throw escape errors to be handled by the main loop
-        if (error instanceof EscapeError) throw error
-        console.log()
-
-        const errorMessage =
-          error instanceof Error ? error.message : String(error)
-
-        // Provide more helpful error messages for common issues
-        if (errorMessage.includes('No decryption key packets found')) {
-          showError(
-            'Decryption failed: This message was not encrypted for your current default key.'
-          )
-          console.log()
-          console.log(
-            colors.muted(
-              '  Tip: Check Key Management to verify the correct keypair is set as default.'
-            )
-          )
-        } else {
-          showError(`Decryption failed: ${errorMessage}`)
-        }
       }
     }
 
-    // Ask if user wants to continue
-    const { nextAction } = await escapeablePrompt([
-      {
-        type: 'list',
-        name: 'nextAction',
-        message: promptMessage('What would you like to do next?'),
-        choices: [
-          {
-            name: `${icons.loop} Perform another operation`,
-            value: 'continue',
-          },
-          exitChoice(),
-        ],
-      },
-    ])
+    // Try to unlock everything else from cache (silent)
+    await unlockAllCached()
 
-    if (nextAction === 'continue') {
-      await main()
-    } else {
-      clearPassphraseCache()
-      console.clear()
-    }
-  }
-
-  // Graceful exit on Ctrl+C
-  process.on('SIGINT', () => {
-    clearPassphraseCache()
-    console.clear()
-    process.exit(0)
-  })
-
-  // Enable global escape key handling and run menu in a loop
-  enableGlobalEscape()
-
-  async function runApp() {
     while (true) {
       try {
-        await main()
+        await showMainMenu()
       } catch (error) {
         const e = error as Error
-
-        // If escape was pressed, just restart the menu
         if (
           error instanceof EscapeError ||
           checkAndResetEscape() ||
@@ -1620,22 +1194,27 @@ function startInteractiveMode(): void {
         ) {
           continue
         }
-
-        // Handle Ctrl+C gracefully (inquirer throws ExitPromptError)
         if (e.message?.includes('force closed the prompt')) {
-          clearPassphraseCache()
+          clearSession()
           console.clear()
           process.exit(0)
         }
-
-        // Handle other errors
-        clearPassphraseCache()
-        console.clear()
+        clearSession()
         showError(`Error: ${e.message || error}`)
-        process.exit(1)
+        await pause()
       }
     }
   }
 
-  runApp()
-} // End of startInteractiveMode
+  process.on('SIGINT', () => {
+    clearSession()
+    console.clear()
+    process.exit(0)
+  })
+
+  enableGlobalEscape()
+  main().catch((error) => {
+    showError(`Fatal: ${error instanceof Error ? error.message : error}`)
+    process.exit(1)
+  })
+}

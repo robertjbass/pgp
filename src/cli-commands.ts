@@ -2,7 +2,10 @@ import * as openpgp from 'openpgp'
 import { readFileSync, writeFileSync } from 'fs'
 import { Db, type Keypair, type Contact } from './db.js'
 import { extractPublicKeyInfo } from './key-utils.js'
-import { getStoredPassphrase, storePassphrase } from './keychain.js'
+import {
+  getCachedPassphrase,
+  cachePassphrase,
+} from './passphrase-store.js'
 
 // Exit codes
 export const EXIT_SUCCESS = 0
@@ -16,6 +19,7 @@ const weakKeyConfig = {
   rejectHashAlgorithms: new Set(),
   rejectMessageHashAlgorithms: new Set(),
   rejectCurves: new Set(),
+  allowMissingKeyFlags: true,
 }
 
 // Types
@@ -191,9 +195,9 @@ export async function generateCommand(options: GenerateOptions): Promise<void> {
       is_default: setDefault || isFirstKeypair,
     })
 
-    // Store passphrase in keychain if provided
+    // Cache passphrase locally so future runs don't reprompt
     if (passphrase) {
-      await storePassphrase(keyInfo.fingerprint, passphrase)
+      cachePassphrase(keyInfo.fingerprint, passphrase)
     }
 
     // Output fingerprint for scripting
@@ -412,13 +416,12 @@ export async function decryptCommand(
       } else if (process.env.LPGP_PASSPHRASE) {
         passphrase = process.env.LPGP_PASSPHRASE
       } else {
-        // Try system keychain
-        const storedPassphrase = await getStoredPassphrase(keypair.fingerprint)
-        if (storedPassphrase) {
-          passphrase = storedPassphrase
+        const stored = getCachedPassphrase(keypair.fingerprint)
+        if (stored) {
+          passphrase = stored
         } else {
           console.error(
-            'Error: Passphrase required. Use --passphrase, LPGP_PASSPHRASE env var, or store in system keychain.'
+            'Error: Passphrase required. Use --passphrase, LPGP_PASSPHRASE env var, or run `lpgp` interactively to cache it.'
           )
           process.exit(EXIT_ERROR)
         }
