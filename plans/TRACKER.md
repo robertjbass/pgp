@@ -27,3 +27,4 @@ Status values: `pending`, `in progress`, `complete`.
 - 2026-09-02: Plan 07 started.
 - 2026-09-02: Plan 07 completed (uncommitted). Plan 08 started.
 - 2026-09-02: Plan 08 completed (uncommitted). All audit plans done.
+- 2026-09-02: Follow-up: key pickers and home status show masked email + fingerprint suffix so same-named keys are distinguishable (shipped in PR #18).

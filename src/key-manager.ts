@@ -7,6 +7,7 @@ import {
   extractPrivateKeyInfo,
   verifyKeyPair,
   formatKeypairInfo,
+  formatKeypairLabel,
   formatAlgorithm,
   obfuscateEmail,
 } from './key-utils.js'
@@ -81,7 +82,7 @@ export class KeyManager {
     if (keypairs.length === 0) return null
 
     const choices: any[] = keypairs.map((kp) => ({
-      name: `${icons.key} ${kp.name} ${colors.muted(`(${obfuscateEmail(kp.email)})`)}${kp.is_default ? ` ${icons.default} Current Default` : ''}`,
+      name: `${icons.key} ${formatKeypairLabel(kp)}${kp.is_default ? ` ${icons.default} Current Default` : ''}`,
       value: kp.id,
     }))
     if (options.allowSkip) {
@@ -906,7 +907,7 @@ export class KeyManager {
         message: promptMessage('Select a key to manage:'),
         choices: [
           ...keypairs.map((kp) => ({
-            name: `${icons.key} ${kp.name} ${colors.muted(`- ${obfuscateEmail(kp.email)}`)}${kp.is_default ? ` ${icons.default} Default` : ''}`,
+            name: `${icons.key} ${formatKeypairLabel(kp)}${kp.is_default ? ` ${icons.default} Default` : ''}`,
             value: kp.id,
           })),
           new inquirer.Separator(),

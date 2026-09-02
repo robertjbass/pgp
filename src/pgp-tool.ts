@@ -9,6 +9,7 @@ import { KeyManager } from './key-manager.js'
 import {
   extractPublicKeyInfo,
   formatMaskedRecipient,
+  formatKeypairLabel,
   filterKeysForMessage,
   readVerificationKeys,
   summarizeSignatures,
@@ -980,7 +981,7 @@ function startInteractiveMode(): void {
           default: defaultId,
           choices: [
             ...keypairs.map((kp) => ({
-              name: `${icons.key} ${kp.name}${kp.is_default ? ` ${colors.muted('(default)')}` : ''}`,
+              name: `${icons.key} ${formatKeypairLabel(kp)}${kp.is_default ? ` ${colors.muted('(default)')}` : ''}`,
               value: kp.id,
             })),
             new inquirer.Separator(),
@@ -1337,7 +1338,11 @@ function startInteractiveMode(): void {
   async function showMainMenu(): Promise<void> {
     printBanner()
     const defaultKp = keyManager.getDefaultKeypair()
-    printHomeStatus(defaultKp ? `${defaultKp.name} key` : null)
+    printHomeStatus(
+      defaultKp
+        ? `${defaultKp.name} key (…${defaultKp.fingerprint.slice(-8)})`
+        : null,
+    )
 
     const menuChoices: any[] = [
       { name: `${icons.clipboard} Copy my public key`, value: 'copy' },

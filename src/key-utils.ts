@@ -327,6 +327,19 @@ export async function validatePassphrase(
 }
 
 /**
+ * One-line label that tells keypairs apart even when names (or emails)
+ * collide: name, masked email, and the last 8 fingerprint characters.
+ * Example: `Personal · b*b@bb***.co · …69DED971`
+ */
+export function formatKeypairLabel(keypair: {
+  name: string
+  email: string
+  fingerprint: string
+}): string {
+  return `${keypair.name} · ${obfuscateEmail(keypair.email)} · …${keypair.fingerprint.slice(-8)}`
+}
+
+/**
  * Human-friendly algorithm label from openpgp's enum name plus bits/curve,
  * e.g. "RSA 4096" or "EdDSA (ed25519)".
  */
