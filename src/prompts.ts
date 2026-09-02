@@ -20,17 +20,28 @@ export class EscapeError extends Error {
   }
 }
 
+/**
+ * True when the chunk is exactly one byte equal to `byte`. stdin may deliver
+ * Buffers or, once something has called `stdin.setEncoding()`, strings, so
+ * both are handled. (The inline editor sets utf8 encoding and Node offers no
+ * way to unset it.)
+ */
+function isSingleByte(data: Buffer | string, byte: number): boolean {
+  if (data.length !== 1) return false
+  return typeof data === 'string' ? data.charCodeAt(0) === byte : data[0] === byte
+}
+
 // Handler for escape key detection
-function onEscapeData(data: Buffer): void {
+function onEscapeData(data: Buffer | string): void {
   // Ctrl+C is byte 3 - handle graceful exit
-  if (data.length === 1 && data[0] === 3) {
+  if (isSingleByte(data, 3)) {
     console.log(chalk.gray('\n  Goodbye!\n'))
     process.exit(0)
   }
 
   // Escape key is byte 27 (0x1b) by itself
   // Arrow keys and other sequences start with 27 but have more bytes
-  if (data.length === 1 && data[0] === 27) {
+  if (isSingleByte(data, 27)) {
     escapeTriggered = true
     // First reject the escape promise to interrupt the prompt
     if (escapeReject) {

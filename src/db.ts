@@ -5,13 +5,19 @@ import initSqlJs, {
 import {
   readFileSync,
   existsSync,
-  mkdirSync,
   writeFileSync,
   copyFileSync,
+  unlinkSync,
+  renameSync,
 } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { getConfigDir, getDbPath } from './config.js'
+import {
+  getConfigDir,
+  getDbPath,
+  ensurePrivate,
+  PRIVATE_FILE_MODE,
+} from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -75,6 +81,7 @@ export type Settings = {
   id: number
   default_keypair_id: number | null
   auto_sign_messages: boolean
+  copy_decrypted_to_clipboard: boolean
   prefer_inline_pgp: boolean
   keyserver_url: string
 }
@@ -112,13 +119,10 @@ export class Db {
       return dbInstance
     }
 
-    // Ensure config directory exists
-    if (!existsSync(DB_DIR)) {
-      mkdirSync(DB_DIR, { recursive: true })
-    }
-
-    // Migrate from legacy location if needed
+    // getConfigDir() (behind DB_DIR) creates the directory with owner-only
+    // permissions and tightens it if it already existed.
     Db.migrateFromLegacyLocation()
+    Db.removeStaleJournalFiles()
 
     // Initialize sql.js
     const SQL = await initSqlJs()
@@ -127,7 +131,16 @@ export class Db {
     let db: SqlJsDatabase
     if (existsSync(DB_PATH)) {
       const buffer = readFileSync(DB_PATH)
-      db = new SQL.Database(buffer)
+      try {
+        db = new SQL.Database(buffer)
+        // Force a real read so a truncated file fails here, not later
+        db.exec('SELECT count(*) FROM sqlite_master')
+      } catch (error) {
+        throw new Error(
+          `The database at ${DB_PATH} could not be opened (${error instanceof Error ? error.message : error}). ` +
+            'It may be corrupted. Restore it from a backup, or move it aside to start fresh (your keys are in that file).'
+        )
+      }
     } else {
       db = new SQL.Database()
     }
@@ -136,6 +149,8 @@ export class Db {
 
     // Initialize schema
     instance.initializeSchema()
+    instance.migrateDropKeypairEmailUnique()
+    instance.runVersionedMigrations()
 
     // Migrate old JSON data if it exists
     instance.migrateFromJson()
@@ -160,10 +175,39 @@ export class Db {
   /**
    * Save database to disk
    */
+  /**
+   * Save atomically: write a sibling temp file, then rename over the
+   * database so a crash mid-write can never leave a truncated file.
+   */
   private save(): void {
     const data = this.db.export()
     const buffer = Buffer.from(data)
-    writeFileSync(DB_PATH, buffer)
+    const tmp = `${DB_PATH}.tmp-${process.pid}`
+    writeFileSync(tmp, buffer, { mode: PRIVATE_FILE_MODE })
+    ensurePrivate(tmp, PRIVATE_FILE_MODE)
+    renameSync(tmp, DB_PATH)
+    ensurePrivate(DB_PATH, PRIVATE_FILE_MODE)
+  }
+
+  /**
+   * Remove leftover `-wal` / `-shm` journal files from the better-sqlite3 era.
+   * sql.js never reads them, so they are dead weight that may still contain
+   * private-key pages, and a real SQLite client would replay a stale WAL over
+   * the newer main file.
+   */
+  private static removeStaleJournalFiles(): void {
+    for (const suffix of ['-wal', '-shm']) {
+      const path = `${DB_PATH}${suffix}`
+      if (!existsSync(path)) continue
+      try {
+        unlinkSync(path)
+        console.error(`Removed stale SQLite journal file: ${path}`)
+      } catch (error) {
+        console.error(
+          `Could not remove stale journal file ${path}: ${error instanceof Error ? error.message : error}`,
+        )
+      }
+    }
   }
 
   /**
@@ -180,11 +224,91 @@ export class Db {
       try {
         // Copy the old database to the new location
         copyFileSync(LEGACY_DB_PATH, DB_PATH)
-        console.log(`Migrated database from ${LEGACY_DB_PATH} to ${DB_PATH}`)
+        console.error(`Migrated database from ${LEGACY_DB_PATH} to ${DB_PATH}`)
       } catch (error) {
         console.error('Failed to migrate database from legacy location:', error)
       }
     }
+  }
+
+  /**
+   * Older databases declared `keypair.email` UNIQUE, which prevents having a
+   * "Personal" and a "Work" key for the same address. SQLite cannot drop a
+   * constraint in place, so rebuild the table from the current schema.
+   */
+  private migrateDropKeypairEmailUnique(): void {
+    const row = this.queryOne(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'keypair'"
+    )
+    const currentSql = row?.sql as string | undefined
+    if (!currentSql || !/email\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(currentSql)) {
+      return
+    }
+
+    const schema = readFileSync(SCHEMA_PATH, 'utf-8')
+    const match = schema.match(/CREATE TABLE IF NOT EXISTS keypair \([\s\S]*?\n\);/)
+    if (!match) {
+      throw new Error('schema.sql is missing the keypair table definition')
+    }
+    const createNew = match[0].replace(
+      'CREATE TABLE IF NOT EXISTS keypair',
+      'CREATE TABLE keypair_new'
+    )
+    const columns = this.queryAll('PRAGMA table_info(keypair)')
+      .map((c) => c.name as string)
+      .join(', ')
+
+    this.db.exec('BEGIN')
+    try {
+      this.db.exec(createNew)
+      this.db.exec(
+        `INSERT INTO keypair_new (${columns}) SELECT ${columns} FROM keypair`
+      )
+      this.db.exec('DROP TABLE keypair')
+      this.db.exec('ALTER TABLE keypair_new RENAME TO keypair')
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    // Recreate the indexes that were dropped with the old table
+    this.initializeSchema()
+    this.save()
+    console.error(
+      'Migrated keypair table: multiple keypairs may now share an email address.'
+    )
+  }
+
+  /**
+   * One-shot migrations tracked with SQLite's `PRAGMA user_version`.
+   * Add a new numbered step for anything that must run exactly once.
+   */
+  private runVersionedMigrations(): void {
+    const current =
+      (this.db.exec('PRAGMA user_version')[0]?.values[0]?.[0] as number) ?? 0
+    const steps: Array<() => void> = [
+      // 1: signing was never exposed in the UI before, so turn it on for
+      //    everyone now that it is the default.
+      () => this.db.run('UPDATE settings SET auto_sign_messages = 1 WHERE id = 1'),
+      // 2: clipboard preference for decrypted text (fresh databases already
+      //    have the column from schema.sql, so guard the ALTER).
+      () => {
+        const cols = this.queryAll('PRAGMA table_info(settings)').map(
+          (c) => c.name
+        )
+        if (!cols.includes('copy_decrypted_to_clipboard')) {
+          this.db.run(
+            'ALTER TABLE settings ADD COLUMN copy_decrypted_to_clipboard INTEGER NOT NULL DEFAULT 1'
+          )
+        }
+      },
+    ]
+    if (current >= steps.length) return
+    for (let i = current; i < steps.length; i++) {
+      steps[i]?.()
+      this.db.run(`PRAGMA user_version = ${i + 1}`)
+    }
+    this.save()
   }
 
   private initializeSchema(): void {
@@ -305,7 +429,7 @@ export class Db {
       }
 
       this.save()
-      console.log('Successfully migrated data from JSON to SQLite')
+      console.error('Successfully migrated data from JSON to SQLite')
     } catch (error) {
       console.error('Failed to migrate JSON data:', error)
     }
@@ -354,11 +478,11 @@ export class Db {
   }: {
     table: T
     where?: {
-      key: keyof Schema[T] extends keyof Schema[T]
-        ? T extends 'settings'
-          ? keyof Settings
-          : keyof Keypair | keyof Contact
-        : never
+      key: T extends 'settings'
+        ? keyof Settings
+        : T extends 'keypair'
+          ? keyof Keypair
+          : keyof Contact
       compare: 'is' | 'is not' | 'like' | 'not like'
       value: unknown
     }
@@ -372,6 +496,9 @@ export class Db {
       return {
         ...row,
         auto_sign_messages: intToBool(row.auto_sign_messages as number),
+        copy_decrypted_to_clipboard: intToBool(
+          (row.copy_decrypted_to_clipboard as number | undefined) ?? 1
+        ),
         prefer_inline_pgp: intToBool(row.prefer_inline_pgp as number),
       } as T extends 'settings' ? Settings : Schema[T]
     }
@@ -389,10 +516,11 @@ export class Db {
               ? 'LIKE'
               : 'NOT LIKE'
 
-      sql += ` WHERE ${String(where.key)} ${operator} ?`
+      const isLike = where.compare === 'like' || where.compare === 'not like'
+      sql += ` WHERE ${String(where.key)} ${operator} ?${isLike ? " ESCAPE '\\'" : ''}`
       params.push(
-        (where.compare === 'like' || where.compare === 'not like'
-          ? `%${where.value}%`
+        (isLike
+          ? `%${String(where.value).replace(/[\\%_]/g, (c) => `\\${c}`)}%`
           : where.value) as SqlValue
       )
     }
@@ -503,15 +631,100 @@ export class Db {
     const sql = `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`
     const info = this.runSql(sql, values)
 
-    // Fetch and return the inserted record
-    const inserted = this.queryOne(`SELECT * FROM ${table} WHERE id = ?`, [
-      info.lastInsertRowid,
-    ])
-    return inserted as T extends 'settings'
+    // Fetch through select() so booleans come back converted
+    const inserted = this.select({
+      table,
+      where: { key: 'id', compare: 'is', value: info.lastInsertRowid },
+    } as Parameters<typeof this.select>[0]) as unknown[]
+    return inserted[0] as T extends 'settings'
       ? Settings
       : T extends 'keypair'
         ? Keypair
         : Contact
+  }
+
+  /**
+   * Insert a keypair. The first keypair ever stored becomes the default
+   * automatically; otherwise it becomes default only when asked. The default
+   * flag is switched after a successful insert so a failed insert can never
+   * leave the database with no default.
+   */
+  public insertKeypair(
+    value: Omit<Keypair, 'id' | 'created_at' | 'updated_at' | 'is_default'>,
+    options: { makeDefault: boolean }
+  ): Keypair {
+    const existing = this.getKeypairByFingerprint(value.fingerprint)
+    if (existing) {
+      throw new Error(
+        `This key is already stored as "${existing.name}" (fingerprint ${existing.fingerprint}).`
+      )
+    }
+
+    const isFirst = this.select({ table: 'keypair' }).length === 0
+    const inserted = this.insert('keypair', { ...value, is_default: false })
+    if (options.makeDefault || isFirst) {
+      this.setDefaultKeypair(inserted.id)
+    }
+    return this.getKeypairById(inserted.id) as Keypair
+  }
+
+  public getKeypairById(id: number): Keypair | null {
+    const rows = this.select({
+      table: 'keypair',
+      where: { key: 'id', compare: 'is', value: id },
+    })
+    return rows[0] ?? null
+  }
+
+  public getKeypairByFingerprint(fingerprint: string): Keypair | null {
+    const rows = this.select({
+      table: 'keypair',
+      where: {
+        key: 'fingerprint',
+        compare: 'is',
+        value: fingerprint.replace(/\s+/g, '').toUpperCase(),
+      },
+    })
+    return rows[0] ?? null
+  }
+
+  public getSettings(): Settings {
+    return this.select({ table: 'settings' })
+  }
+
+  public updateSettings(updates: Partial<Omit<Settings, 'id'>>): Settings {
+    return this.insert('settings', updates)
+  }
+
+  public getDefaultKeypair(): Keypair | null {
+    const rows = this.select({
+      table: 'keypair',
+      where: { key: 'is_default', compare: 'is', value: 1 },
+    })
+    return rows[0] ?? null
+  }
+
+  /**
+   * Make exactly one keypair the default, atomically.
+   */
+  public setDefaultKeypair(id: number): void {
+    const now = new Date().toISOString()
+    this.db.exec('BEGIN')
+    try {
+      this.db.run(
+        'UPDATE keypair SET is_default = 0, updated_at = ? WHERE is_default = 1',
+        [now]
+      )
+      this.db.run(
+        'UPDATE keypair SET is_default = 1, updated_at = ? WHERE id = ?',
+        [now, id]
+      )
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    this.save()
   }
 
   public update<T extends keyof Schema>(
@@ -527,7 +740,10 @@ export class Db {
         : Partial<Contact>
   ): void {
     const now = new Date().toISOString()
-    const record = { ...updates, updated_at: now } as Record<string, unknown>
+    // The settings table has no updated_at column
+    const record = (
+      table === 'settings' ? { ...updates } : { ...updates, updated_at: now }
+    ) as Record<string, unknown>
 
     // Convert booleans to integers for SQLite
     if (table === 'keypair') {
@@ -560,6 +776,10 @@ export class Db {
       if ('prefer_inline_pgp' in record)
         record.prefer_inline_pgp = boolToInt(
           record.prefer_inline_pgp as boolean
+        )
+      if ('copy_decrypted_to_clipboard' in record)
+        record.copy_decrypted_to_clipboard = boolToInt(
+          record.copy_decrypted_to_clipboard as boolean
         )
     }
 

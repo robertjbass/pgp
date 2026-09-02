@@ -212,8 +212,11 @@ export async function readInlineMultiline(
       }
       if (input.startsWith('\x1b')) return
 
-      buffer = buffer.slice(0, cursor) + input + buffer.slice(cursor)
-      cursor += input.length
+      // Pasted text may carry CRLF line endings or tabs; keep the buffer to
+      // plain newlines and spaces so armored blocks parse and columns line up.
+      const text = input.replace(/\r\n?/g, '\n').replace(/\t/g, '  ')
+      buffer = buffer.slice(0, cursor) + text + buffer.slice(cursor)
+      cursor += text.length
       repaint()
     }
 

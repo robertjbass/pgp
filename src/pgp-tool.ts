@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 import * as openpgp from 'openpgp'
 import inquirer from 'inquirer'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import clipboardy from 'clipboardy'
 import { Command } from 'commander'
 import { Db, type Keypair } from './db.js'
 import { KeyManager } from './key-manager.js'
-import { extractPublicKeyInfo, formatMaskedRecipient } from './key-utils.js'
+import {
+  extractPublicKeyInfo,
+  formatMaskedRecipient,
+  formatKeypairLabel,
+  filterKeysForMessage,
+  readVerificationKeys,
+  summarizeSignatures,
+  describeSignature,
+  type KnownKey,
+  type SignatureStatus,
+} from './key-utils.js'
 import {
   escapeablePrompt,
   enableGlobalEscape,
@@ -16,6 +26,7 @@ import {
 import {
   getCachedPassphrase,
   cachePassphrase,
+  removeCachedPassphrase,
 } from './passphrase-store.js'
 import { readInlineMultiline } from './inline-editor.js'
 import {
@@ -40,7 +51,20 @@ import {
   listKeysCommand,
   encryptCommand,
   decryptCommand,
+  signCommand,
+  verifyCommand,
 } from './cli-commands.js'
+import {
+  importKeyCommand,
+  importContactCommand,
+  listContactsCommand,
+  removeContactCommand,
+  setDefaultCommand,
+  deleteKeyCommand,
+  renameKeyCommand,
+  exportPrivateCommand,
+  clearCacheCommand,
+} from './cli-manage.js'
 import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -61,22 +85,6 @@ function collect(value: string, previous: string[]): string[] {
   return previous.concat([value])
 }
 
-function isCLIMode(): boolean {
-  const args = process.argv.slice(2)
-  if (args.length === 0) return false
-  const commands = [
-    'generate',
-    'export-public',
-    'list-keys',
-    'encrypt',
-    'decrypt',
-    '--help',
-    '-h',
-    '--version',
-    '-V',
-  ]
-  return commands.some((cmd) => args[0] === cmd || args[0]?.startsWith('-'))
-}
 
 function setupCLI(): void {
   const program = new Command()
@@ -92,7 +100,68 @@ function setupCLI(): void {
     .option('--passphrase <pass>', 'Passphrase to protect the key')
     .option('--no-passphrase', 'Generate without passphrase protection')
     .option('--no-set-default', 'Do not set as default keypair')
+    .option('--no-cache', 'Do not cache the passphrase locally')
+    .option('--type <ecc|rsa>', 'Key type: ecc (Curve25519, default) or rsa (4096)')
+    .option('--expires <days>', 'Expire the key after this many days (default: never)')
     .action(generateCommand)
+
+  program
+    .command('import-key [armored]')
+    .description('Import an armored private key (public key is derived if absent)')
+    .option('--file <path>', 'Read the key from a file')
+    .option('--passphrase <pass>', 'Passphrase of the private key')
+    .option('--name <name>', 'Display name for the keypair (default: key user ID)')
+    .option('--set-default', 'Make it the default keypair')
+    .option('--no-cache', 'Do not cache the passphrase locally')
+    .action(importKeyCommand)
+
+  program
+    .command('import-contact [armored]')
+    .description("Add or refresh a contact from an armored public key")
+    .option('--file <path>', 'Read the key from a file')
+    .option('--name <name>', 'Display name (default: key user ID)')
+    .action(importContactCommand)
+
+  program
+    .command('list-contacts')
+    .description('List all contacts')
+    .option('--json', 'Output as JSON')
+    .action(listContactsCommand)
+
+  program
+    .command('remove-contact <fingerprint-or-email>')
+    .description('Remove a contact')
+    .action(removeContactCommand)
+
+  program
+    .command('set-default <fingerprint>')
+    .description('Make a keypair the default')
+    .action(setDefaultCommand)
+
+  program
+    .command('delete-key <fingerprint>')
+    .description('Delete a keypair and forget its cached passphrase')
+    .option('--yes', 'Confirm deletion')
+    .action(deleteKeyCommand)
+
+  program
+    .command('rename-key <fingerprint> <name>')
+    .description('Rename a keypair')
+    .action(renameKeyCommand)
+
+  program
+    .command('export-private')
+    .description('Export an armored private key (handle with care)')
+    .option('--fingerprint <fp>', 'Keypair to export (default: default keypair)')
+    .option('--output <path>', 'Write to file (mode 0600) instead of stdout')
+    .action(exportPrivateCommand)
+
+  program
+    .command('clear-cache')
+    .description('Forget cached passphrases')
+    .option('--fingerprint <fp>', 'Only this keypair')
+    .option('--all', 'All keypairs')
+    .action(clearCacheCommand)
 
   program
     .command('export-public')
@@ -121,6 +190,9 @@ function setupCLI(): void {
     )
     .option('--file <path>', 'Read message from file')
     .option('--output <path>', 'Write to file (default: stdout)')
+    .option('--no-sign', 'Do not sign the message (signed with the default key by default)')
+    .option('--sign-with <fingerprint>', 'Sign with this keypair instead of the default')
+    .option('--passphrase <pass>', 'Passphrase for the signing key')
     .action(encryptCommand)
 
   program
@@ -128,12 +200,33 @@ function setupCLI(): void {
     .description('Decrypt a message')
     .option('--passphrase <pass>', 'Passphrase for private key')
     .option('--file <path>', 'Read encrypted message from file')
+    .option(
+      '--key <fingerprint>',
+      'Decrypt with this keypair (default: whichever stored key the message is for)',
+    )
     .action(decryptCommand)
+
+  program
+    .command('sign [message]')
+    .description('Clear-sign a message (not encrypted) with your key')
+    .option('--file <path>', 'Read message from file')
+    .option('--output <path>', 'Write to file (default: stdout)')
+    .option('--key <fingerprint>', 'Sign with this keypair (default: default keypair)')
+    .option('--passphrase <pass>', 'Passphrase for the signing key')
+    .action(signCommand)
+
+  program
+    .command('verify [message]')
+    .description('Verify a clear-signed message against your stored keys')
+    .option('--file <path>', 'Read signed message from file')
+    .action(verifyCommand)
 
   program.parse()
 }
 
-if (isCLIMode()) {
+// No arguments: interactive mode. Anything else is handled by commander, which
+// rejects unknown subcommands instead of silently opening the menu.
+if (process.argv.length > 2) {
   setupCLI()
 } else {
   startInteractiveMode()
@@ -156,13 +249,16 @@ function startInteractiveMode(): void {
 
   type EditorChoice = {
     name: string
+    /** Full command placed in $EDITOR; GUI editors must block until closed. */
     command: string
+    /** Binary probed with `which`; omit for commands that always exist. */
+    binary?: string
     available: boolean
   }
 
-  function checkEditorAvailable(command: string): boolean {
+  function checkEditorAvailable(binary: string): boolean {
     try {
-      execSync(`which ${command}`, { stdio: 'ignore' })
+      execFileSync('which', [binary], { stdio: 'ignore' })
       return true
     } catch {
       return false
@@ -170,26 +266,26 @@ function startInteractiveMode(): void {
   }
 
   function detectAvailableEditors(): EditorChoice[] {
+    // The external-editor helper reads the temp file as soon as the command
+    // exits, so GUI editors need their "wait until closed" flag.
     const editors: EditorChoice[] = [
-      { name: 'VS Code', command: 'code', available: false },
-      { name: 'Neovim', command: 'nvim', available: false },
-      { name: 'Vim', command: 'vim', available: false },
-      { name: 'Nano', command: 'nano', available: false },
-      { name: 'Emacs', command: 'emacs', available: false },
+      { name: 'VS Code', command: 'code --wait', binary: 'code', available: false },
+      { name: 'Neovim', command: 'nvim', binary: 'nvim', available: false },
+      { name: 'Vim', command: 'vim', binary: 'vim', available: false },
+      { name: 'Nano', command: 'nano', binary: 'nano', available: false },
+      { name: 'Emacs', command: 'emacs', binary: 'emacs', available: false },
     ]
 
     if (process.platform === 'darwin') {
-      editors.push({ name: 'TextEdit', command: 'open -e', available: true })
+      editors.push({ name: 'TextEdit', command: 'open -W -e', available: true })
     } else if (process.platform === 'win32') {
       editors.push({ name: 'Notepad', command: 'notepad', available: true })
     }
 
     for (const editor of editors) {
-      if (editor.command.includes('open -e') || editor.command === 'notepad') {
-        editor.available = true
-      } else {
-        editor.available = checkEditorAvailable(editor.command)
-      }
+      editor.available = editor.binary
+        ? checkEditorAvailable(editor.binary)
+        : true
     }
 
     return editors.filter((e) => e.available)
@@ -200,9 +296,9 @@ function startInteractiveMode(): void {
       nano: 'Save: Ctrl+O, then Enter. Exit: Ctrl+X',
       vim: 'Save and exit: :wq  |  Cancel: :q!',
       nvim: 'Save and exit: :wq  |  Cancel: :q!',
-      code: 'Save: Cmd/Ctrl+S, then close the editor tab',
+      'code --wait': 'Save: Cmd/Ctrl+S, then close the editor tab',
       emacs: 'Save: Ctrl+X Ctrl+S  |  Exit: Ctrl+X Ctrl+C',
-      'open -e': 'Save: Cmd+S, then close the window',
+      'open -W -e': 'Save: Cmd+S, then close the window',
       notepad: 'Save: Ctrl+S, then close the window',
     }
     return instructions[editorCommand] || 'Save and close the editor when done'
@@ -263,8 +359,12 @@ function startInteractiveMode(): void {
         unlockedKeys.set(keypair.fingerprint, unlocked)
         return unlocked
       } catch {
+        // Evict it so the warning does not repeat on every launch.
+        removeCachedPassphrase(keypair.fingerprint)
         if (options.silent) return null
-        showWarning(`Saved passphrase for "${keypair.name}" is invalid.`)
+        showWarning(
+          `Saved passphrase for "${keypair.name}" no longer unlocks the key and was forgotten.`,
+        )
       }
     } else if (options.silent) {
       return null
@@ -301,6 +401,7 @@ function startInteractiveMode(): void {
         showError('Incorrect passphrase. Try again.')
       }
     }
+    showWarning(`Too many incorrect attempts for "${keypair.name}".`)
     return null
   }
 
@@ -324,6 +425,7 @@ function startInteractiveMode(): void {
   async function encryptForKeys(
     message: string,
     publicKeysArmored: string[],
+    options: { signingKey?: openpgp.PrivateKey | undefined } = {},
   ): Promise<string> {
     const publicKeys = await Promise.all(
       publicKeysArmored.map((key) =>
@@ -333,37 +435,86 @@ function startInteractiveMode(): void {
     const encrypted = await openpgp.encrypt({
       message: await openpgp.createMessage({ text: message }),
       encryptionKeys: publicKeys,
+      ...(options.signingKey ? { signingKeys: options.signingKey } : {}),
       config: weakKeyConfig,
     })
     return encrypted as string
   }
 
+  /**
+   * The unlocked default key to sign with, or null when signing is off, no
+   * default exists, or the user declines to unlock it.
+   */
+  async function resolveSigningKey(): Promise<{
+    key: openpgp.PrivateKey
+    keypair: Keypair
+  } | null> {
+    if (!db.getSettings().auto_sign_messages) return null
+    const keypair = keyManager.getDefaultKeypair()
+    if (!keypair) return null
+    const key = await unlockKeypair(keypair)
+    return key ? { key, keypair } : null
+  }
+
+  /** Every public key we can verify signatures against. */
+  function knownKeys(): KnownKey[] {
+    return [
+      ...db.select({ table: 'keypair' }).map((kp) => ({
+        kind: 'keypair' as const,
+        name: kp.name,
+        email: kp.email,
+        fingerprint: kp.fingerprint,
+        public_key: kp.public_key,
+      })),
+      ...db.select({ table: 'contact' }).map((c) => ({
+        kind: 'contact' as const,
+        name: c.name,
+        email: c.email,
+        fingerprint: c.fingerprint,
+        public_key: c.public_key,
+      })),
+    ]
+  }
+
   // ---------- Decryption ----------
 
-  async function decryptWithSession(encryptedMessage: string): Promise<string> {
+  type DecryptResult = { plaintext: string; signatures: SignatureStatus[] }
+
+  async function decryptWithSession(
+    encryptedMessage: string,
+  ): Promise<DecryptResult> {
     const message = await openpgp.readMessage({
       armoredMessage: encryptedMessage,
     })
+    const { keys: verificationKeys, owners } = await readVerificationKeys(
+      knownKeys(),
+    )
 
+    let lastError: string | null = null
     const tryWith = async (
       keys: openpgp.PrivateKey[],
-    ): Promise<string | null> => {
+    ): Promise<DecryptResult | null> => {
       if (keys.length === 0) return null
       try {
-        const { data } = await openpgp.decrypt({
+        const { data, signatures } = await openpgp.decrypt({
           message,
           decryptionKeys: keys,
+          ...(verificationKeys.length > 0 ? { verificationKeys } : {}),
           config: weakKeyConfig,
         })
-        return data as string
-      } catch {
+        return {
+          plaintext: data as string,
+          signatures: await summarizeSignatures(signatures, owners),
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error)
         return null
       }
     }
 
     const firstTry = await tryWith(getUnlockedPrivateKeys())
     if (firstTry !== null) {
-      markKeyAsUsed(message)
+      await markKeyAsUsed(message)
       return firstTry
     }
 
@@ -372,23 +523,19 @@ function startInteractiveMode(): void {
       throw new Error('Message contains no recipient information')
     }
 
-    const allKeypairs = db.select({ table: 'keypair' })
-    const matching: Keypair[] = []
-    const seen = new Set<number>()
-    for (const keyID of keyIDs) {
-      const idHex = keyID.toHex().toUpperCase()
-      for (const kp of allKeypairs) {
-        if (seen.has(kp.id)) continue
-        if (kp.fingerprint.toUpperCase().endsWith(idHex)) {
-          matching.push(kp)
-          seen.add(kp.id)
-        }
-      }
+    const matching = await findKeypairsForMessage(message)
+
+    if (matching.length === 0) {
+      throw new Error('This message was not encrypted for any of your keys')
     }
 
     const locked = matching.filter((kp) => !unlockedKeys.has(kp.fingerprint))
     if (locked.length === 0) {
-      throw new Error('This message was not encrypted for any of your keys')
+      // The right key is unlocked, so the failure is in the message itself.
+      const names = matching.map((kp) => `"${kp.name}"`).join(', ')
+      throw new Error(
+        `The message is for ${names} but could not be decrypted${lastError ? `: ${lastError}` : ''}. It may be corrupted or incomplete.`,
+      )
     }
 
     for (const kp of locked) {
@@ -397,26 +544,47 @@ function startInteractiveMode(): void {
       if (!unlocked) continue
       const result = await tryWith([unlocked])
       if (result !== null) {
-        markKeyAsUsed(message)
+        await markKeyAsUsed(message)
         return result
       }
     }
 
-    throw new Error('Could not decrypt with any of your matching keys')
+    throw new Error(
+      `Could not decrypt with any of your matching keys${lastError ? `: ${lastError}` : ''}`,
+    )
   }
 
-  function markKeyAsUsed(message: openpgp.Message<string>): void {
-    const keyIDs = message.getEncryptionKeyIDs()
-    if (keyIDs.length === 0) return
-    const allKeypairs = db.select({ table: 'keypair' })
-    for (const keyID of keyIDs) {
-      const idHex = keyID.toHex().toUpperCase()
-      const match = allKeypairs.find(
-        (kp) =>
-          kp.fingerprint.toUpperCase().endsWith(idHex) &&
-          unlockedKeys.has(kp.fingerprint),
-      )
-      if (match) {
+  /**
+   * Drop unlocked keys that no longer exist in the database (deleted in the
+   * key manager) and pick up cached passphrases for keys added since startup.
+   */
+  async function syncSessionWithDb(): Promise<void> {
+    const stored = new Set(
+      db.select({ table: 'keypair' }).map((kp) => kp.fingerprint),
+    )
+    for (const fingerprint of Array.from(unlockedKeys.keys())) {
+      if (!stored.has(fingerprint)) unlockedKeys.delete(fingerprint)
+    }
+    await unlockAllCached()
+  }
+
+  /**
+   * Find stored keypairs the message was encrypted for. Messages are
+   * encrypted to the encryption subkey, so we must check every key ID in
+   * the keypair (primary + subkeys), not just the primary fingerprint.
+   */
+  function findKeypairsForMessage(
+    message: openpgp.Message<string>,
+  ): Promise<Keypair[]> {
+    return filterKeysForMessage(message, db.select({ table: 'keypair' }))
+  }
+
+  async function markKeyAsUsed(
+    message: openpgp.Message<string>,
+  ): Promise<void> {
+    const matching = await findKeypairsForMessage(message)
+    for (const match of matching) {
+      if (unlockedKeys.has(match.fingerprint)) {
         db.update(
           'keypair',
           { key: 'id', value: match.id },
@@ -466,7 +634,7 @@ function startInteractiveMode(): void {
         last_verified_at: null,
         notes: null,
         expires_at: keyInfo.expiresAt,
-        revoked: false,
+        revoked: keyInfo.revoked,
       })
       showInfo(`Saved "${keyInfo.name}" to contacts.`)
     } catch {
@@ -716,10 +884,16 @@ function startInteractiveMode(): void {
               const already = recipients.some(
                 (r) => r.publicKey === c.public_key,
               )
+              const unusable = keyUnusableReason(c)
+              const note = already
+                ? colors.muted(' (added)')
+                : unusable
+                  ? colors.error(` (${unusable})`)
+                  : ''
               return {
-                name: `${c.name} <${c.email}>${already ? colors.muted(' (added)') : ''}`,
+                name: `${c.name} <${c.email}>${note}`,
                 value: c.id,
-                disabled: already,
+                disabled: already || unusable !== null,
               }
             }),
           },
@@ -807,7 +981,7 @@ function startInteractiveMode(): void {
           default: defaultId,
           choices: [
             ...keypairs.map((kp) => ({
-              name: `${icons.key} ${kp.name}${kp.is_default ? ` ${colors.muted('(default)')}` : ''}`,
+              name: `${icons.key} ${formatKeypairLabel(kp)}${kp.is_default ? ` ${colors.muted('(default)')}` : ''}`,
               value: kp.id,
             })),
             new inquirer.Separator(),
@@ -835,6 +1009,18 @@ function startInteractiveMode(): void {
     await pause()
   }
 
+  /** Why a stored key cannot be encrypted to, or null when it is usable. */
+  function keyUnusableReason(key: {
+    revoked: boolean
+    expires_at: string | null
+  }): 'revoked' | 'expired' | null {
+    if (key.revoked) return 'revoked'
+    if (key.expires_at && new Date(key.expires_at).getTime() < Date.now()) {
+      return 'expired'
+    }
+    return null
+  }
+
   async function actionEncrypt(): Promise<void> {
     let recipients: Recipient[] = []
 
@@ -848,6 +1034,20 @@ function startInteractiveMode(): void {
         await openpgp.readKey({ armoredKey: armored, config: weakKeyConfig })
         const info = await extractPublicKeyInfo(armored)
         const masked = formatMaskedRecipient(info)
+        const ownKey = db.getKeypairByFingerprint(info.fingerprint)
+        const unusable = keyUnusableReason({
+          revoked: info.revoked,
+          expires_at: info.expiresAt,
+        })
+        if (ownKey) {
+          // Probably left over from "Copy my public key"; don't offer it.
+          throw new Error('own key in clipboard')
+        }
+        if (unusable) {
+          showWarning(`The public key in your clipboard is ${unusable}; ignoring it.`)
+          console.log()
+          throw new Error('unusable key in clipboard')
+        }
 
         const { useClipboard } = await escapeablePrompt<{
           useClipboard: boolean
@@ -918,10 +1118,14 @@ function startInteractiveMode(): void {
             name: 'contactId',
             message: promptMessage('Select contact:'),
             choices: [
-              ...contacts.map((c) => ({
-                name: `${icons.contact} ${c.name} ${colors.muted(`<${c.email}>`)}`,
-                value: c.id,
-              })),
+              ...contacts.map((c) => {
+                const unusable = keyUnusableReason(c)
+                return {
+                  name: `${icons.contact} ${c.name} ${colors.muted(`<${c.email}>`)}${unusable ? colors.error(` (${unusable})`) : ''}`,
+                  value: c.id,
+                  disabled: unusable !== null,
+                }
+              }),
               new inquirer.Separator(),
               backChoice(),
             ],
@@ -963,9 +1167,18 @@ function startInteractiveMode(): void {
 
     if (recipients.length === 0) return
 
-    if (recipients.length > 1) {
+    const signing = await resolveSigningKey()
+    if (db.getSettings().auto_sign_messages && !signing) {
+      showWarning('No unlocked default key; the message will not be signed.')
+      console.log()
+    }
+
+    if (recipients.length > 1 || signing) {
       console.log(colors.primary('\nEncrypting for:'))
       for (const r of recipients) console.log(colors.muted(`  • ${r.name}`))
+      if (signing) {
+        console.log(colors.muted(`  Signed with "${signing.keypair.name}"`))
+      }
       console.log()
     }
 
@@ -983,10 +1196,25 @@ function startInteractiveMode(): void {
 
     // 4. Encrypt
     showLoading('Encrypting…')
-    const encrypted = await encryptForKeys(
-      message,
-      recipients.map((r) => r.publicKey),
-    )
+    let encrypted: string
+    try {
+      encrypted = await encryptForKeys(
+        message,
+        recipients.map((r) => r.publicKey),
+        { signingKey: signing?.key },
+      )
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      console.log()
+      showError(`Encryption failed: ${reason}`)
+      const savedToClipboard = await writeClipboardSafe(message)
+      if (savedToClipboard) {
+        showInfo('Your message was copied to the clipboard so you can retry.')
+      }
+      console.log()
+      await pause()
+      return
+    }
 
     // 5. Display + copy
     console.clear()
@@ -1054,19 +1282,36 @@ function startInteractiveMode(): void {
     // 3. Decrypt
     showLoading('Decrypting…')
     try {
-      const plaintext = await decryptWithSession(encrypted)
+      const { plaintext, signatures } = await decryptWithSession(encrypted)
+      const invalid = signatures.filter((s) => s.status === 'invalid')
 
       console.clear()
       printBanner()
+      if (invalid.length > 0) {
+        showError('SIGNATURE INVALID: this message may have been altered in transit.')
+        console.log()
+      }
       console.log(colors.successBold('Decrypted Message:\n'))
       printDivider()
       console.log(plaintext)
       printDivider()
       console.log()
-
-      const copied = await writeClipboardSafe(plaintext)
-      if (copied) showSuccess('Decrypted message copied to clipboard.')
+      if (signatures.length === 0) {
+        console.log(colors.muted('  Not signed.'))
+      }
+      for (const sig of signatures) {
+        const line = describeSignature(sig)
+        if (sig.status === 'valid') showSuccess(line)
+        else if (sig.status === 'unknown') showWarning(line)
+        else showError(line)
+      }
       console.log()
+
+      if (db.getSettings().copy_decrypted_to_clipboard) {
+        const copied = await writeClipboardSafe(plaintext)
+        if (copied) showSuccess('Decrypted message copied to clipboard.')
+        console.log()
+      }
       await pause()
     } catch (error) {
       if (error instanceof EscapeError) throw error
@@ -1093,7 +1338,11 @@ function startInteractiveMode(): void {
   async function showMainMenu(): Promise<void> {
     printBanner()
     const defaultKp = keyManager.getDefaultKeypair()
-    printHomeStatus(defaultKp ? `${defaultKp.name} key` : null)
+    printHomeStatus(
+      defaultKp
+        ? `${defaultKp.name} key (…${defaultKp.fingerprint.slice(-8)})`
+        : null,
+    )
 
     const menuChoices: any[] = [
       { name: `${icons.clipboard} Copy my public key`, value: 'copy' },
@@ -1120,7 +1369,11 @@ function startInteractiveMode(): void {
     }
 
     if (action === 'keys') {
-      await keyManager.showKeyManagementMenu()
+      try {
+        await keyManager.showKeyManagementMenu()
+      } finally {
+        await syncSessionWithDb()
+      }
       return
     }
 
@@ -1154,42 +1407,63 @@ function startInteractiveMode(): void {
 
     printBanner()
 
-    const hasKeypair = keyManager.hasDefaultKeypair()
-    if (!hasKeypair) {
-      console.log()
-      showWarning("No keypair found. Let's set up your first keypair.")
-      console.log()
-      await keyManager.setupFirstKeypair()
-      console.log()
-      showSuccess('Setup complete!')
-      console.log()
-    }
-
-    // Unlock default key up front if not already cached
-    const defaultKp = keyManager.getDefaultKeypair()
-    if (
-      defaultKp &&
-      defaultKp.passphrase_protected &&
-      !unlockedKeys.has(defaultKp.fingerprint)
-    ) {
-      const unlocked = await unlockKeypair(defaultKp)
-      if (!unlocked) {
-        showWarning('No passphrase provided. Decryption will be unavailable.')
+    await startupStep(async () => {
+      if (keyManager.hasDefaultKeypair()) return
+      const stored = db.select({ table: 'keypair' })
+      if (stored.length > 0) {
+        console.log()
+        showWarning('You have keypairs stored but none is set as default.')
+        console.log()
+        await keyManager.chooseDefaultKeypair({ allowSkip: true })
+      } else {
+        console.log()
+        showWarning("No keypair found. Let's set up your first keypair.")
+        console.log()
+        await keyManager.setupFirstKeypair()
+        console.log()
+        if (keyManager.hasDefaultKeypair()) {
+          showSuccess('Setup complete!')
+        } else {
+          showWarning(
+            'No keypair was added. You can add one from "Manage keys & contacts".',
+          )
+        }
         console.log()
       }
-    }
+    })
+
+    // Unlock default key up front if not already cached
+    await startupStep(async () => {
+      const defaultKp = keyManager.getDefaultKeypair()
+      if (
+        defaultKp &&
+        defaultKp.passphrase_protected &&
+        !unlockedKeys.has(defaultKp.fingerprint)
+      ) {
+        const unlocked = await unlockKeypair(defaultKp)
+        if (!unlocked) {
+          showWarning(
+            `"${defaultKp.name}" stays locked for now. You will be asked for its passphrase when a message needs it.`,
+          )
+          console.log()
+        }
+      }
+    })
 
     // Try to unlock everything else from cache (silent)
-    await unlockAllCached()
+    await startupStep(unlockAllCached)
 
     while (true) {
       try {
         await showMainMenu()
       } catch (error) {
         const e = error as Error
+        // Always clear the flag, even when we recognise the EscapeError itself,
+        // so a stale flag cannot swallow the next real error.
+        const wasEscape = checkAndResetEscape()
         if (
           error instanceof EscapeError ||
-          checkAndResetEscape() ||
+          wasEscape ||
           e.message?.includes('prompt was closed')
         ) {
           continue
@@ -1201,8 +1475,36 @@ function startInteractiveMode(): void {
         }
         clearSession()
         showError(`Error: ${e.message || error}`)
-        await pause()
+        await pauseIgnoringEscape()
       }
+    }
+  }
+
+  async function pauseIgnoringEscape(): Promise<void> {
+    try {
+      await pause()
+    } catch (error) {
+      if (!(error instanceof EscapeError)) throw error
+    } finally {
+      checkAndResetEscape()
+    }
+  }
+
+  /**
+   * Run a startup step. Escape means "skip this for now" rather than a fatal
+   * error: the user lands on the main menu and is prompted again when needed.
+   */
+  async function startupStep(step: () => Promise<void>): Promise<void> {
+    try {
+      await step()
+    } catch (error) {
+      const wasEscape = checkAndResetEscape()
+      if (error instanceof EscapeError || wasEscape) {
+        console.clear()
+        printBanner()
+        return
+      }
+      throw error
     }
   }
 
