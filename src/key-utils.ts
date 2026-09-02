@@ -84,11 +84,8 @@ export function obfuscateEmail(email: string): string {
   return `${obfuscatedLocal}@${obfuscatedDomain}${tld}`
 }
 
-/**
- * Extract key information from a PGP public key
- */
 // Config to allow weak keys like DSA (not recommended for production)
-const weakKeyConfig = {
+export const weakKeyConfig = {
   rejectPublicKeyAlgorithms: new Set(),
   rejectHashAlgorithms: new Set(),
   rejectMessageHashAlgorithms: new Set(),
@@ -96,6 +93,66 @@ const weakKeyConfig = {
   allowMissingKeyFlags: true,
 }
 
+/**
+ * Derive capabilities from the key's actual flags and validity instead of
+ * assuming. openpgp v6 throws (rather than returning null) when no suitable
+ * key exists, so each probe is wrapped.
+ */
+async function detectKeyCapabilities(key: openpgp.Key): Promise<{
+  canSign: boolean
+  canEncrypt: boolean
+  canCertify: boolean
+  canAuthenticate: boolean
+  revoked: boolean
+}> {
+  const probe = async (fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn()
+      return true
+    } catch {
+      return false
+    }
+  }
+  const canSign = await probe(() =>
+    key.getSigningKey(undefined, undefined, undefined, weakKeyConfig)
+  )
+  const canEncrypt = await probe(() =>
+    key.getEncryptionKey(undefined, undefined, undefined, weakKeyConfig)
+  )
+
+  const flagsOf = (sig: { keyFlags?: Uint8Array | null } | null | undefined) =>
+    sig?.keyFlags?.[0] ?? 0
+  let primaryFlags = 0
+  try {
+    const { selfCertification } = await key.getPrimaryUser(
+      undefined,
+      undefined,
+      weakKeyConfig
+    )
+    primaryFlags = flagsOf(selfCertification)
+  } catch {
+    // No valid self-certification; treat as no flags
+  }
+  const subkeyFlags = key.subkeys.map((sk) => flagsOf(sk.bindingSignatures[0]))
+  const anyFlag = (bit: number) =>
+    (primaryFlags & bit) !== 0 || subkeyFlags.some((f) => (f & bit) !== 0)
+
+  const canCertify = (primaryFlags & openpgp.enums.keyFlags.certifyKeys) !== 0
+  const canAuthenticate = anyFlag(openpgp.enums.keyFlags.authentication)
+
+  let revoked = false
+  try {
+    revoked = await key.isRevoked(undefined, undefined, undefined, weakKeyConfig)
+  } catch {
+    revoked = false
+  }
+
+  return { canSign, canEncrypt, canCertify, canAuthenticate, revoked }
+}
+
+/**
+ * Extract key information from a PGP public key
+ */
 export async function extractPublicKeyInfo(armoredKey: string): Promise<{
   fingerprint: string
   email: string
@@ -107,33 +164,17 @@ export async function extractPublicKeyInfo(armoredKey: string): Promise<{
   canEncrypt: boolean
   canCertify: boolean
   canAuthenticate: boolean
+  revoked: boolean
 }> {
   const publicKey = await openpgp.readKey({ armoredKey, config: weakKeyConfig })
   const user = publicKey.users[0]
   const userID = user?.userID
 
   // Extract primary key info
-  const primaryKey = publicKey.keyPacket
-  const algorithm = primaryKey.getAlgorithmInfo().algorithm
-  const bits = primaryKey.getAlgorithmInfo().bits
+  const { algorithm, bits, curve } = publicKey.keyPacket.getAlgorithmInfo()
 
-  // Get key capabilities
-  try {
-    await publicKey.verifyPrimaryKey(undefined, undefined, weakKeyConfig)
-    // If verification doesn't throw, the key is valid
-  } catch (e) {
-    // Key verification failed
-  }
-  const canSign = true // Assume true for generated keys
-  const canEncrypt =
-    (await publicKey.getEncryptionKey(
-      undefined,
-      undefined,
-      undefined,
-      weakKeyConfig
-    )) !== null
-  const canCertify = true // Primary keys can typically certify
-  const canAuthenticate = false // Not common for primary keys
+  const { canSign, canEncrypt, canCertify, canAuthenticate, revoked } =
+    await detectKeyCapabilities(publicKey)
 
   // Get expiration
   let expiresAt: string | null = null
@@ -150,12 +191,13 @@ export async function extractPublicKeyInfo(armoredKey: string): Promise<{
     email: userID?.email || 'unknown@example.com',
     name: userID?.name || 'Unknown',
     algorithm,
-    keySize: bits?.toString() || 'unknown',
+    keySize: bits?.toString() ?? curve ?? 'unknown',
     expiresAt,
     canSign,
     canEncrypt,
     canCertify,
     canAuthenticate,
+    revoked,
   }
 }
 
@@ -176,6 +218,7 @@ export async function extractPrivateKeyInfo(
   canEncrypt: boolean
   canCertify: boolean
   canAuthenticate: boolean
+  revoked: boolean
   passphraseProtected: boolean
 }> {
   let privateKey = await openpgp.readPrivateKey({
@@ -199,27 +242,10 @@ export async function extractPrivateKeyInfo(
   const userID = user?.userID
 
   // Extract primary key info
-  const primaryKey = privateKey.keyPacket
-  const algorithm = primaryKey.getAlgorithmInfo().algorithm
-  const bits = primaryKey.getAlgorithmInfo().bits
+  const { algorithm, bits, curve } = privateKey.keyPacket.getAlgorithmInfo()
 
-  // Get key capabilities
-  try {
-    await privateKey.verifyPrimaryKey(undefined, undefined, weakKeyConfig)
-    // If verification doesn't throw, the key is valid
-  } catch (e) {
-    // Key verification failed
-  }
-  const canSign = true // Assume true for generated keys
-  const canEncrypt =
-    (await privateKey.getEncryptionKey(
-      undefined,
-      undefined,
-      undefined,
-      weakKeyConfig
-    )) !== null
-  const canCertify = true
-  const canAuthenticate = false
+  const { canSign, canEncrypt, canCertify, canAuthenticate, revoked } =
+    await detectKeyCapabilities(privateKey)
 
   // Get expiration
   let expiresAt: string | null = null
@@ -236,12 +262,13 @@ export async function extractPrivateKeyInfo(
     email: userID?.email || 'unknown@example.com',
     name: userID?.name || 'Unknown',
     algorithm,
-    keySize: bits?.toString() || 'unknown',
+    keySize: bits?.toString() ?? curve ?? 'unknown',
     expiresAt,
     canSign,
     canEncrypt,
     canCertify,
     canAuthenticate,
+    revoked,
     passphraseProtected: isEncrypted,
   }
 }
@@ -300,6 +327,33 @@ export async function validatePassphrase(
 }
 
 /**
+ * Human-friendly algorithm label from openpgp's enum name plus bits/curve,
+ * e.g. "RSA 4096" or "EdDSA (ed25519)".
+ */
+export function formatAlgorithm(algorithm: string, keySize: string): string {
+  const names: Record<string, string> = {
+    rsaEncryptSign: 'RSA',
+    rsaEncrypt: 'RSA',
+    rsaSign: 'RSA',
+    dsa: 'DSA',
+    elgamal: 'ElGamal',
+    ecdh: 'ECDH',
+    ecdsa: 'ECDSA',
+    eddsa: 'EdDSA',
+    eddsaLegacy: 'EdDSA',
+    ed25519: 'Ed25519',
+    ed448: 'Ed448',
+    x25519: 'X25519',
+    x448: 'X448',
+  }
+  const name = names[algorithm] ?? algorithm
+  if (!keySize || keySize === 'unknown') return name
+  // openpgp names the pre-RFC-9580 curves "…Legacy"; users know them as ed25519/cv25519
+  const size = keySize.replace(/Legacy$/, '').replace(/^curve25519$/, 'cv25519')
+  return /^\d+$/.test(size) ? `${name} ${size}` : `${name} (${size})`
+}
+
+/**
  * Format a keypair for display
  */
 export function formatKeypairInfo(keypair: Keypair): string {
@@ -307,7 +361,7 @@ export function formatKeypairInfo(keypair: Keypair): string {
     `Name: ${keypair.name}`,
     `Email: ${obfuscateEmail(keypair.email)}`,
     `Fingerprint: ${keypair.fingerprint}`,
-    `Algorithm: ${keypair.algorithm} (${keypair.key_size})`,
+    `Algorithm: ${formatAlgorithm(keypair.algorithm, keypair.key_size)}`,
     keypair.expires_at
       ? `Expires: ${new Date(keypair.expires_at).toLocaleDateString()}`
       : 'Expires: Never',
@@ -324,4 +378,139 @@ export function formatKeypairInfo(keypair: Keypair): string {
   ]
 
   return lines.filter(Boolean).join('\n')
+}
+
+/**
+ * Return the stored keys a message was encrypted for. OpenPGP encrypts to the
+ * encryption *subkey*, so each stored key is parsed and every key ID in it
+ * (primary and subkeys) is compared against the message's recipient key IDs.
+ * Keys that fail to parse are skipped.
+ */
+export async function filterKeysForMessage<T extends { public_key: string }>(
+  message: openpgp.Message<string>,
+  candidates: T[],
+): Promise<T[]> {
+  const keyIDs = message.getEncryptionKeyIDs()
+  if (keyIDs.length === 0) return []
+  const matching: T[] = []
+  for (const candidate of candidates) {
+    try {
+      const key = await openpgp.readKey({
+        armoredKey: candidate.public_key,
+        config: weakKeyConfig,
+      })
+      if (keyIDs.some((id) => key.getKeys(id).length > 0)) {
+        matching.push(candidate)
+      }
+    } catch {
+      // Unparseable stored key; ignore it here
+    }
+  }
+  return matching
+}
+
+/**
+ * Match a user-supplied fingerprint against a stored one. Accepts the full
+ * fingerprint or a suffix of at least 8 hex characters (a long key ID),
+ * ignoring case and whitespace. Returns false for anything shorter so a
+ * partial or empty string can never match everything.
+ */
+export function fingerprintMatches(stored: string, input: string): boolean {
+  const needle = input.replace(/\s+/g, '').toUpperCase()
+  if (needle.length < 8 || !/^[0-9A-F]+$/.test(needle)) return false
+  return stored.toUpperCase().endsWith(needle)
+}
+
+/** A key we can verify signatures against, with how to describe its owner. */
+export type KnownKey = {
+  kind: 'keypair' | 'contact'
+  name: string
+  email: string
+  fingerprint: string
+  public_key: string
+}
+
+export type SignatureStatus = {
+  /** Long key ID of the signing key, hex, upper case. */
+  keyID: string
+  /** Who signed, when the key is one we know. */
+  signer: Omit<KnownKey, 'public_key'> | null
+  /** 'valid', 'invalid' (known key, bad signature), or 'unknown' (key not stored). */
+  status: 'valid' | 'invalid' | 'unknown'
+  error?: string
+}
+
+/**
+ * Parse the keys we can verify against. Unparseable keys are skipped.
+ */
+export async function readVerificationKeys(
+  known: KnownKey[],
+): Promise<{ keys: openpgp.PublicKey[]; owners: Map<string, KnownKey> }> {
+  const keys: openpgp.PublicKey[] = []
+  const owners = new Map<string, KnownKey>()
+  for (const item of known) {
+    try {
+      const key = await openpgp.readKey({
+        armoredKey: item.public_key,
+        config: weakKeyConfig,
+      })
+      keys.push(key)
+      for (const k of key.getKeys()) {
+        owners.set(k.getKeyID().toHex().toUpperCase(), item)
+      }
+    } catch {
+      // Skip
+    }
+  }
+  return { keys, owners }
+}
+
+/**
+ * Turn openpgp's lazy signature results into a plain status list.
+ */
+export async function summarizeSignatures(
+  signatures: { keyID: openpgp.KeyID; verified: Promise<true> }[],
+  owners: Map<string, KnownKey>,
+): Promise<SignatureStatus[]> {
+  const result: SignatureStatus[] = []
+  for (const sig of signatures) {
+    const keyID = sig.keyID.toHex().toUpperCase()
+    const owner = owners.get(keyID) ?? null
+    const signer = owner
+      ? {
+          kind: owner.kind,
+          name: owner.name,
+          email: owner.email,
+          fingerprint: owner.fingerprint,
+        }
+      : null
+    try {
+      await sig.verified
+      result.push({ keyID, signer, status: 'valid' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      result.push({
+        keyID,
+        signer,
+        status: owner ? 'invalid' : 'unknown',
+        error: message,
+      })
+    }
+  }
+  return result
+}
+
+/** Human-readable one-liner for a signature status. */
+export function describeSignature(sig: SignatureStatus): string {
+  const who = sig.signer
+    ? `${sig.signer.name} <${sig.signer.email}>`
+    : `unknown key ${sig.keyID}`
+  switch (sig.status) {
+    case 'valid':
+      return `Signed by ${who} (verified)`
+    case 'unknown':
+      return `Signed by ${who}; add their public key to verify it`
+    case 'invalid':
+      return `INVALID signature from ${who}; the message may have been altered`
+  }
 }

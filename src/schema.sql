@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS keypair (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,                      -- e.g., "Work", "Personal"
-  email TEXT NOT NULL UNIQUE,              -- Your email address
+  email TEXT NOT NULL,                     -- Your email address (several keypairs may share one)
   fingerprint TEXT NOT NULL UNIQUE,        -- Unique identifier for the keypair
   public_key TEXT NOT NULL,                -- Armored public key
   private_key TEXT NOT NULL,               -- Armored private key
@@ -67,8 +67,9 @@ CREATE TABLE IF NOT EXISTS contact (
 -- Stores application settings (single row with typed fields)
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),   -- Ensure only one row exists
-  default_keypair_id INTEGER,              -- References keypair.id
-  auto_sign_messages INTEGER NOT NULL DEFAULT 0,
+  default_keypair_id INTEGER,              -- Unused: the default lives in keypair.is_default
+  auto_sign_messages INTEGER NOT NULL DEFAULT 1,   -- Sign outgoing messages with the default key
+  copy_decrypted_to_clipboard INTEGER NOT NULL DEFAULT 1, -- Copy decrypted text to the clipboard
   prefer_inline_pgp INTEGER NOT NULL DEFAULT 1,
   keyserver_url TEXT NOT NULL DEFAULT 'https://keys.openpgp.org',
 
@@ -83,4 +84,4 @@ CREATE INDEX IF NOT EXISTS idx_contact_fingerprint ON contact(fingerprint);
 
 -- Initialize settings table with default values
 INSERT OR IGNORE INTO settings (id, auto_sign_messages, prefer_inline_pgp, keyserver_url)
-VALUES (1, 0, 1, 'https://keys.openpgp.org');
+VALUES (1, 1, 1, 'https://keys.openpgp.org');

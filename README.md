@@ -12,7 +12,7 @@ This project is **actively being developed** as a learning exercise. While funct
 
 - **PGP Encryption/Decryption** - Secure message encryption using OpenPGP
 - **SQLite Key Management** - Store and manage multiple keypairs and contacts
-- **System Keychain Integration** - Passphrases stored securely in your OS keychain
+- **Passphrase Caching** - Unlock a key once per machine; the passphrase is kept in an owner-only encrypted cache
 - **Clipboard Integration** - Seamlessly encrypt/decrypt from clipboard
 - **Multiple Input Methods** - Clipboard, text editor, or inline terminal input
 - **Cross-Platform Support** - Works on Linux, macOS, and Windows
@@ -137,10 +137,25 @@ For scripting and CI/CD, lpgp supports non-interactive commands:
 # Generate a new keypair
 lpgp generate --name "Your Name" --email "you@example.com" --passphrase "secret"
 lpgp generate --name "Your Name" --email "you@example.com" --no-passphrase
+lpgp generate ... --type rsa --expires 730   # RSA 4096 instead of Curve25519, 2-year expiry
 
 # List all keypairs
 lpgp list-keys
 lpgp list-keys --json
+
+# Manage keypairs
+lpgp import-key --file secret.asc --passphrase "secret" --set-default
+lpgp set-default ABCD1234
+lpgp rename-key ABCD1234 "Work"
+lpgp delete-key ABCD1234 --yes
+lpgp export-private --fingerprint ABCD1234 --output backup.asc
+lpgp clear-cache --all              # forget cached passphrases
+lpgp generate ... --no-cache        # never write the passphrase to the cache
+
+# Contacts (other people's public keys)
+lpgp import-contact --file alice.pub
+lpgp list-contacts --json
+lpgp remove-contact alice@example.com
 
 # Export public key
 lpgp export-public
@@ -155,16 +170,27 @@ echo "Hello" | lpgp encrypt --to user@example.com
 lpgp decrypt "-----BEGIN PGP MESSAGE-----..."
 lpgp decrypt --file encrypted.pgp --passphrase "secret"
 cat encrypted.pgp | lpgp decrypt
+lpgp decrypt --key ABCD1234 --file encrypted.pgp   # force a specific keypair
+
+# Signing (encrypt signs with your default key unless --no-sign)
+lpgp encrypt "Hello" --to user@example.com --no-sign
+lpgp encrypt "Hello" --to user@example.com --sign-with ABCD1234
+lpgp sign "I approve this" > approval.asc           # clear-signed, not encrypted
+lpgp verify --file approval.asc                     # status on stderr, text on stdout
 
 # Help
 lpgp --help
 lpgp encrypt --help
 ```
 
-**Passphrase sources for decryption:**
+**Signatures:** `decrypt` and `verify` report the signature result on stderr (`Signature: Signed by Alice <alice@example.com> (verified)`), keep the message on stdout, and exit with code 4 when a signature is invalid. Add a sender's public key as a contact to verify their signatures.
+
+**Exit codes:** 0 success, 1 usage or unexpected error, 2 wrong passphrase / decryption failed, 3 key or recipient not found, 4 bad or unverifiable signature.
+
+**Passphrase sources for decryption and signing:**
 1. `--passphrase` command line option
 2. `LPGP_PASSPHRASE` environment variable
-3. System keychain (if previously stored)
+3. Local passphrase cache at `~/.lpgp/.cache` (populated the first time you unlock a key interactively)
 
 ## Development
 
@@ -190,9 +216,9 @@ pnpm start
 lpgp/
 ├── src/
 │   ├── pgp-tool.ts       # Main CLI entry point
-│   ├── cli-commands.ts   # Non-interactive CLI command handlers
-│   ├── encrypt.ts        # Encryption logic
-│   ├── decrypt.ts        # Decryption logic
+│   ├── cli-commands.ts   # Non-interactive commands: generate, encrypt, decrypt, sign, verify
+│   ├── cli-manage.ts     # Non-interactive key and contact management commands
+│   ├── passphrase-store.ts # Encrypted local passphrase cache
 │   ├── key-manager.ts    # Key management UI
 │   ├── key-utils.ts      # Key utility functions
 │   ├── db.ts             # SQLite database layer
@@ -209,7 +235,7 @@ lpgp/
 See [TODO.md](TODO.md) for the complete project roadmap. Completed and upcoming features:
 
 - SQLite database integration
-- System keychain passphrase storage
+- Local passphrase cache
 - Key generation and management
 - Multi-recipient encryption
 - Contact management
@@ -220,8 +246,9 @@ See [TODO.md](TODO.md) for the complete project roadmap. Completed and upcoming 
 
 As this is a learning project, please note:
 
-- Passphrases are stored in your system keychain (macOS Keychain, Windows Credential Manager, etc.)
-- Keys are stored in SQLite database at `~/.lpgp/data.db`
+- Keys are stored in a SQLite database at `~/.lpgp/data.db`. The directory and file are owner-only (`0700` / `0600`).
+- Passphrases you enter interactively are cached in `~/.lpgp/.cache` (owner-only, AES-256-GCM). The cache key is derived from machine identity (hostname, username, home directory), not a secret, so it prevents casual reading but not a determined attacker with access to your home directory. Use "Clear cached passphrase" in the key manager to forget one.
+- Passing `--passphrase` on the command line exposes it to shell history and process listings; prefer the `LPGP_PASSPHRASE` environment variable in scripts.
 - The `.gitignore` excludes database and `.env` files
 - This tool has not undergone professional security audit
 - For production use, consider more secure key storage methods (e.g., hardware tokens)
@@ -256,6 +283,6 @@ The source code is publicly available to promote transparency, enable security a
 - PGP encryption and cryptography fundamentals
 - Node.js CLI development with TypeScript
 - Security best practices for handling sensitive data
-- System keychain integration for secure credential storage
+- Trade-offs in local credential caching
 
 It's a work in progress and will continue to evolve as I learn more about encryption and secure communication.

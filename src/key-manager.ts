@@ -1,5 +1,4 @@
 import inquirer from 'inquirer'
-import chalk from 'chalk'
 import * as readline from 'readline'
 import * as openpgp from 'openpgp'
 import { Db, type Keypair, type Contact } from './db.js'
@@ -8,6 +7,7 @@ import {
   extractPrivateKeyInfo,
   verifyKeyPair,
   formatKeypairInfo,
+  formatAlgorithm,
   obfuscateEmail,
 } from './key-utils.js'
 import {
@@ -16,10 +16,10 @@ import {
   exportGpgPublicKey,
   exportGpgSecretKey,
   getGpgHomeDir,
-  type SystemKey,
 } from './system-keys.js'
-import { escapeablePrompt } from './prompts.js'
+import { escapeablePrompt, EscapeError } from './prompts.js'
 import {
+  cachePassphrase,
   hasCachedPassphrase,
   removeCachedPassphrase,
 } from './passphrase-store.js'
@@ -38,6 +38,7 @@ import {
   showSuccess,
   showError,
   showWarning,
+  showInfo,
   showLoading,
   promptMessage,
   mainMenuChoice,
@@ -58,22 +59,54 @@ export class KeyManager {
    * Check if there's a default keypair configured
    */
   hasDefaultKeypair(): boolean {
-    const keypairs = this.db.select({
-      table: 'keypair',
-      where: { key: 'is_default', compare: 'is', value: 1 },
-    })
-    return keypairs.length > 0
+    return this.db.getDefaultKeypair() !== null
   }
 
   /**
    * Get the default keypair
    */
   getDefaultKeypair(): Keypair | null {
-    const keypairs = this.db.select({
-      table: 'keypair',
-      where: { key: 'is_default', compare: 'is', value: 1 },
-    })
-    return keypairs[0] || null
+    return this.db.getDefaultKeypair()
+  }
+
+  /**
+   * Ask the user to pick a default keypair from the ones stored. Used when
+   * the database has keypairs but none is marked default (e.g. after the
+   * default was deleted). Returns the chosen keypair, or null if skipped.
+   */
+  async chooseDefaultKeypair(
+    options: { allowSkip?: boolean } = {}
+  ): Promise<Keypair | null> {
+    const keypairs = this.db.select({ table: 'keypair' })
+    if (keypairs.length === 0) return null
+
+    const choices: any[] = keypairs.map((kp) => ({
+      name: `${icons.key} ${kp.name} ${colors.muted(`(${obfuscateEmail(kp.email)})`)}${kp.is_default ? ` ${icons.default} Current Default` : ''}`,
+      value: kp.id,
+    }))
+    if (options.allowSkip) {
+      choices.push(new inquirer.Separator(), {
+        name: `${icons.back} Skip for now`,
+        value: 'skip',
+      })
+    }
+
+    const { keypairId } = await escapeablePrompt<{ keypairId: number | 'skip' }>([
+      {
+        type: 'list',
+        name: 'keypairId',
+        message: promptMessage('Select default keypair:'),
+        choices,
+      },
+    ])
+    if (keypairId === 'skip') return null
+
+    this.db.setDefaultKeypair(keypairId)
+    const chosen = this.db.getKeypairById(keypairId)
+    console.log()
+    showSuccess(`"${chosen?.name}" is now your default keypair.`)
+    console.log()
+    return chosen
   }
 
   /**
@@ -223,21 +256,7 @@ export class KeyManager {
       }
     }
 
-    if (!publicKey) {
-      console.log(promptMessage('\nPaste your PGP PUBLIC key:'))
-      console.log(
-        colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)')
-      )
-      publicKey = await this.readKeyInput()
-    }
-
-    // Validate public key format
-    if (!publicKey.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
-      console.log()
-      showError('Invalid public key format')
-      console.log()
-      return
-    }
+    // A separate public block is optional: it can be derived from the private key.
 
     // Get private key if not already extracted
     if (!privateKey && hasPrivateInClipboard) {
@@ -276,44 +295,47 @@ export class KeyManager {
       return
     }
 
-    // Verify keys match
     console.log()
     showLoading('Verifying keypair...')
-    const keysMatch = await verifyKeyPair(publicKey, privateKey)
-
-    if (!keysMatch) {
-      console.log()
-      showError('Public and private keys do not match. Please try again.')
-      console.log()
-      return
+    if (publicKey) {
+      const keysMatch = await verifyKeyPair(publicKey, privateKey)
+      if (!keysMatch) {
+        console.log()
+        showError('Public and private keys do not match. Please try again.')
+        console.log()
+        return
+      }
+    } else {
+      try {
+        const parsed = await openpgp.readPrivateKey({ armoredKey: privateKey })
+        publicKey = parsed.toPublic().armor()
+      } catch (error) {
+        console.log()
+        showError(
+          `Could not read private key: ${error instanceof Error ? error.message : error}`
+        )
+        console.log()
+        return
+      }
     }
 
-    // Prompt for passphrase if key is encrypted
-    const { passphrase } = await escapeablePrompt([
-      {
-        type: 'password',
-        name: 'passphrase',
-        message: promptMessage(
-          'Enter passphrase for private key (leave empty if none):'
-        ),
-        mask: '*',
-      },
-    ])
+    if (await this.rejectIfAlreadyStored(privateKey)) return
 
-    // Extract key information
+    const verified = await this.promptPassphraseWithRetry(
+      privateKey,
+      'Enter passphrase for private key (leave empty if none):'
+    )
+    if (!verified) return
+    const { keyInfo, passphrase } = verified
+
     try {
-      const keyInfo = await extractPrivateKeyInfo(
-        privateKey,
-        passphrase || undefined
-      )
-
       console.log()
       showSuccess('Keypair verified!')
       console.log()
       console.log(colors.muted('Key Information:'))
       showKeyValue('  Email', keyInfo.email)
       showKeyValue('  Fingerprint', keyInfo.fingerprint)
-      showKeyValue('  Algorithm', `${keyInfo.algorithm} (${keyInfo.keySize})`)
+      showKeyValue('  Algorithm', formatAlgorithm(keyInfo.algorithm, keyInfo.keySize))
       showKeyValue(
         '  Passphrase Protected',
         keyInfo.passphraseProtected ? 'Yes' : 'No'
@@ -334,48 +356,38 @@ export class KeyManager {
         makeDefault = setDefault
       }
 
-      // If setting as default, unset current default
-      if (makeDefault) {
-        const currentDefaults = this.db.select({
-          table: 'keypair',
-          where: { key: 'is_default', compare: 'is', value: 1 },
-        })
-        for (const kp of currentDefaults) {
-          this.db.update(
-            'keypair',
-            { key: 'id', value: kp.id },
-            { is_default: false }
-          )
-        }
-      }
-
-      // Save to database
-      this.db.insert('keypair', {
-        name: name.trim(),
-        email: keyInfo.email,
-        fingerprint: keyInfo.fingerprint,
-        public_key: publicKey,
-        private_key: privateKey,
-        passphrase_protected: keyInfo.passphraseProtected,
-        algorithm: keyInfo.algorithm,
-        key_size: keyInfo.keySize,
-        can_sign: keyInfo.canSign,
-        can_encrypt: keyInfo.canEncrypt,
-        can_certify: keyInfo.canCertify,
-        can_authenticate: keyInfo.canAuthenticate,
-        expires_at: keyInfo.expiresAt,
-        revoked: false,
-        revocation_reason: null,
-        last_used_at: null,
-        is_default: makeDefault,
-      })
+      // Save to database (default is switched only after a successful insert)
+      this.db.insertKeypair(
+        {
+          name: name.trim(),
+          email: keyInfo.email,
+          fingerprint: keyInfo.fingerprint,
+          public_key: publicKey,
+          private_key: privateKey,
+          passphrase_protected: keyInfo.passphraseProtected,
+          algorithm: keyInfo.algorithm,
+          key_size: keyInfo.keySize,
+          can_sign: keyInfo.canSign,
+          can_encrypt: keyInfo.canEncrypt,
+          can_certify: keyInfo.canCertify,
+          can_authenticate: keyInfo.canAuthenticate,
+          expires_at: keyInfo.expiresAt,
+          revoked: keyInfo.revoked,
+          revocation_reason: null,
+          last_used_at: null,
+        },
+        { makeDefault: makeDefault }
+      )
 
       console.log()
       showSuccess('Keypair imported successfully!')
       console.log()
     } catch (error) {
+      if (error instanceof EscapeError) throw error
       console.log()
-      showError(`Error importing keypair: ${error}`)
+      showError(
+        `Error importing keypair: ${error instanceof Error ? error.message : error}`
+      )
       console.log()
     }
   }
@@ -444,6 +456,50 @@ export class KeyManager {
       },
     ])
 
+    const { keyType } = await escapeablePrompt<{ keyType: 'ecc' | 'rsa' }>([
+      {
+        type: 'list',
+        name: 'keyType',
+        message: promptMessage('Key type:'),
+        choices: [
+          {
+            name: `Curve25519 ${colors.muted('(recommended: small, fast, modern)')}`,
+            value: 'ecc',
+          },
+          {
+            name: `RSA 4096 ${colors.muted('(widest compatibility with old software)')}`,
+            value: 'rsa',
+          },
+        ],
+      },
+    ])
+
+    const { expiryDays } = await escapeablePrompt<{ expiryDays: number }>([
+      {
+        type: 'list',
+        name: 'expiryDays',
+        message: promptMessage('Key expiry:'),
+        choices: [
+          { name: 'Never', value: 0 },
+          { name: '1 year', value: 365 },
+          { name: '2 years', value: 730 },
+        ],
+      },
+    ])
+
+    let makeDefault = setAsDefault
+    if (!setAsDefault && this.db.select({ table: 'keypair' }).length > 0) {
+      const { setDefault } = await escapeablePrompt<{ setDefault: boolean }>([
+        {
+          type: 'confirm',
+          name: 'setDefault',
+          message: promptMessage('Set this as your default keypair?'),
+          default: true,
+        },
+      ])
+      makeDefault = setDefault
+    }
+
     console.log()
     showLoading('Generating keypair... (this may take a moment)')
     console.log()
@@ -451,10 +507,12 @@ export class KeyManager {
     try {
       // Generate the keypair
       const { privateKey, publicKey } = await openpgp.generateKey({
-        type: 'rsa',
-        rsaBits: 4096,
+        ...(keyType === 'rsa'
+          ? { type: 'rsa' as const, rsaBits: 4096 }
+          : { type: 'ecc' as const, curve: 'curve25519Legacy' as const }),
         userIDs: [{ name: userName, email: email }],
         passphrase: passphrase,
+        ...(expiryDays > 0 ? { keyExpirationTime: expiryDays * 86400 } : {}),
         format: 'armored',
       })
 
@@ -463,7 +521,10 @@ export class KeyManager {
       const privateKeyInfo = await extractPrivateKeyInfo(privateKey, passphrase)
 
       // Store in database
-      const keypair: Omit<Keypair, 'id' | 'created_at' | 'updated_at'> = {
+      const keypair: Omit<
+        Keypair,
+        'id' | 'created_at' | 'updated_at' | 'is_default'
+      > = {
         name: keypairName.trim(),
         email: publicKeyInfo.email,
         fingerprint: publicKeyInfo.fingerprint,
@@ -477,25 +538,13 @@ export class KeyManager {
         can_certify: publicKeyInfo.canCertify,
         can_authenticate: publicKeyInfo.canAuthenticate,
         expires_at: publicKeyInfo.expiresAt,
-        revoked: false,
+        revoked: publicKeyInfo.revoked,
         revocation_reason: null,
         last_used_at: null,
-        is_default: setAsDefault,
       }
 
-      // If setting as default, unset all other defaults
-      if (setAsDefault) {
-        const allKeypairs = this.db.select({ table: 'keypair' })
-        for (const kp of allKeypairs) {
-          this.db.update(
-            'keypair',
-            { key: 'id', value: kp.id },
-            { is_default: false }
-          )
-        }
-      }
-
-      this.db.insert('keypair', keypair)
+      this.db.insertKeypair(keypair, { makeDefault })
+      cachePassphrase(publicKeyInfo.fingerprint, passphrase)
 
       showSuccess('Keypair generated successfully!')
       console.log()
@@ -506,7 +555,7 @@ export class KeyManager {
       showKeyValue('Fingerprint', publicKeyInfo.fingerprint)
       showKeyValue(
         'Algorithm',
-        `${publicKeyInfo.algorithm} (${publicKeyInfo.keySize} bits)`
+        formatAlgorithm(publicKeyInfo.algorithm, publicKeyInfo.keySize)
       )
       printDivider()
       console.log()
@@ -617,32 +666,23 @@ export class KeyManager {
       },
     ])
 
-    // Prompt for passphrase
-    const { passphrase } = await escapeablePrompt([
-      {
-        type: 'password',
-        name: 'passphrase',
-        message: promptMessage(
-          'Enter GPG key passphrase (if any, leave empty if none):'
-        ),
-        mask: '*',
-      },
-    ])
+    if (await this.rejectIfAlreadyStored(privateKey)) return
 
-    // Extract key information
+    const verified = await this.promptPassphraseWithRetry(
+      privateKey,
+      'Enter GPG key passphrase (if any, leave empty if none):'
+    )
+    if (!verified) return
+    const { keyInfo, passphrase } = verified
+
     try {
-      const keyInfo = await extractPrivateKeyInfo(
-        privateKey,
-        passphrase || undefined
-      )
-
       console.log()
       showSuccess('Key exported successfully!')
       console.log()
       console.log(colors.muted('Key Information:'))
       showKeyValue('  Email', keyInfo.email)
       showKeyValue('  Fingerprint', keyInfo.fingerprint)
-      showKeyValue('  Algorithm', `${keyInfo.algorithm} (${keyInfo.keySize})`)
+      showKeyValue('  Algorithm', formatAlgorithm(keyInfo.algorithm, keyInfo.keySize))
       showKeyValue(
         '  Passphrase Protected',
         keyInfo.passphraseProtected ? 'Yes' : 'No'
@@ -659,48 +699,38 @@ export class KeyManager {
         },
       ])
 
-      // If setting as default, unset current default
-      if (setDefault) {
-        const currentDefaults = this.db.select({
-          table: 'keypair',
-          where: { key: 'is_default', compare: 'is', value: 1 },
-        })
-        for (const kp of currentDefaults) {
-          this.db.update(
-            'keypair',
-            { key: 'id', value: kp.id },
-            { is_default: false }
-          )
-        }
-      }
-
-      // Save to database
-      this.db.insert('keypair', {
-        name: name.trim(),
-        email: keyInfo.email,
-        fingerprint: keyInfo.fingerprint,
-        public_key: publicKey,
-        private_key: privateKey,
-        passphrase_protected: keyInfo.passphraseProtected,
-        algorithm: keyInfo.algorithm,
-        key_size: keyInfo.keySize,
-        can_sign: keyInfo.canSign,
-        can_encrypt: keyInfo.canEncrypt,
-        can_certify: keyInfo.canCertify,
-        can_authenticate: keyInfo.canAuthenticate,
-        expires_at: keyInfo.expiresAt,
-        revoked: false,
-        revocation_reason: null,
-        last_used_at: null,
-        is_default: setDefault,
-      })
+      // Save to database (default is switched only after a successful insert)
+      this.db.insertKeypair(
+        {
+          name: name.trim(),
+          email: keyInfo.email,
+          fingerprint: keyInfo.fingerprint,
+          public_key: publicKey,
+          private_key: privateKey,
+          passphrase_protected: keyInfo.passphraseProtected,
+          algorithm: keyInfo.algorithm,
+          key_size: keyInfo.keySize,
+          can_sign: keyInfo.canSign,
+          can_encrypt: keyInfo.canEncrypt,
+          can_certify: keyInfo.canCertify,
+          can_authenticate: keyInfo.canAuthenticate,
+          expires_at: keyInfo.expiresAt,
+          revoked: keyInfo.revoked,
+          revocation_reason: null,
+          last_used_at: null,
+        },
+        { makeDefault: setDefault }
+      )
 
       console.log()
       showSuccess('Keypair imported from GPG successfully!')
       console.log()
     } catch (error) {
+      if (error instanceof EscapeError) throw error
       console.log()
-      showError(`Error importing keypair: ${error}`)
+      showError(
+        `Error importing keypair: ${error instanceof Error ? error.message : error}`
+      )
       console.log()
     }
   }
@@ -730,8 +760,10 @@ export class KeyManager {
   }
 
   async showKeyManagementMenu(): Promise<'back' | 'main-menu' | void> {
-    const installedVersion = getInstalledVersion()
-    const latestVersion = getLatestVersion()
+    const [installedVersion, latestVersion] = await Promise.all([
+      getInstalledVersion(),
+      getLatestVersion(),
+    ])
     const hasUpdate =
       installedVersion &&
       latestVersion &&
@@ -743,6 +775,22 @@ export class KeyManager {
       { name: `${icons.import} Import keypair`, value: 'import' },
       { name: `${icons.gpg} Import from system GPG`, value: 'import-gpg' },
       { name: `${icons.generate} Generate new keypair`, value: 'generate' },
+      {
+        name: `${icons.key} Sign my messages: ${
+          this.db.getSettings().auto_sign_messages
+            ? colors.success('On')
+            : colors.muted('Off')
+        } ${colors.muted('(toggle)')}`,
+        value: 'toggle-sign',
+      },
+      {
+        name: `${icons.clipboard} Copy decrypted text to clipboard: ${
+          this.db.getSettings().copy_decrypted_to_clipboard
+            ? colors.success('On')
+            : colors.muted('Off')
+        } ${colors.muted('(toggle)')}`,
+        value: 'toggle-copy',
+      },
     ]
 
     if (!installedVersion) {
@@ -794,6 +842,32 @@ export class KeyManager {
         await this.generateKeypair()
         await this.showKeyManagementMenu()
         break
+      case 'toggle-copy': {
+        const next = !this.db.getSettings().copy_decrypted_to_clipboard
+        this.db.updateSettings({ copy_decrypted_to_clipboard: next })
+        console.log()
+        showInfo(
+          next
+            ? 'Decrypted messages will be copied to the clipboard.'
+            : 'Decrypted messages will only be shown on screen.'
+        )
+        console.log()
+        await this.showKeyManagementMenu()
+        break
+      }
+      case 'toggle-sign': {
+        const next = !this.db.getSettings().auto_sign_messages
+        this.db.updateSettings({ auto_sign_messages: next })
+        console.log()
+        showInfo(
+          next
+            ? 'Outgoing messages will be signed with your default key.'
+            : 'Outgoing messages will not be signed.'
+        )
+        console.log()
+        await this.showKeyManagementMenu()
+        break
+      }
       case 'install':
       case 'update':
         await installOrUpdateGlobally(action === 'update')
@@ -933,7 +1007,7 @@ export class KeyManager {
         await this.clearStoredPassphrase(keypair)
         return this.manageIndividualKey(keypair)
       case 'delete':
-        const deleted = await this.deleteKeypairById(keypair.id)
+        const deleted = await this.deleteKeypairById(keypair)
         if (!deleted) {
           return this.manageIndividualKey(keypair)
         }
@@ -991,6 +1065,27 @@ export class KeyManager {
 
     if (exportType === 'cancel' || exportType === 'main-menu') return
 
+    if (exportType === 'both') {
+      console.log()
+      showWarning(
+        'The private key is the secret that decrypts your messages. Anyone who obtains it' +
+          (keypair.passphrase_protected
+            ? ' and your passphrase'
+            : ' (it is NOT passphrase-protected)') +
+          ' can read everything encrypted for you.',
+      )
+      console.log()
+      const { confirmPrivate } = await escapeablePrompt([
+        {
+          type: 'confirm',
+          name: 'confirmPrivate',
+          message: promptMessage('Export the private key?'),
+          default: false,
+        },
+      ])
+      if (!confirmPrivate) return
+    }
+
     const { exportMethod } = await escapeablePrompt([
       {
         type: 'list',
@@ -1021,7 +1116,15 @@ export class KeyManager {
     const label = exportType === 'public' ? 'Public Key' : 'Keypair'
     console.log(colors.successBold(`Exported ${label}:\n`))
     printDivider()
-    console.log(content)
+    if (exportType === 'both' && exportMethod === 'clipboard') {
+      // Keep the private block out of terminal scrollback when it only needs
+      // to reach the clipboard.
+      console.log(keypair.public_key)
+      console.log()
+      console.log(colors.muted('PRIVATE KEY: (copied to clipboard, not shown)'))
+    } else {
+      console.log(content)
+    }
     printDivider()
 
     if (exportMethod === 'clipboard') {
@@ -1030,6 +1133,11 @@ export class KeyManager {
         await clipboardy.write(content)
         console.log()
         showSuccess(`${label} copied to clipboard`)
+        if (exportType === 'both') {
+          showWarning(
+            'Your clipboard now holds a private key. Paste it where it belongs, then copy something else.',
+          )
+        }
         console.log()
       } catch (error) {
         console.log()
@@ -1070,23 +1178,7 @@ export class KeyManager {
    * Set a keypair as default by ID
    */
   private async setDefaultKeypairById(keypairId: number): Promise<void> {
-    const keypairs = this.db.select({ table: 'keypair' })
-
-    // Unset all defaults
-    for (const kp of keypairs) {
-      this.db.update(
-        'keypair',
-        { key: 'id', value: kp.id },
-        { is_default: false }
-      )
-    }
-
-    // Set new default
-    this.db.update(
-      'keypair',
-      { key: 'id', value: keypairId },
-      { is_default: true }
-    )
+    this.db.setDefaultKeypair(keypairId)
 
     console.log()
     showSuccess('Set as default keypair!')
@@ -1114,7 +1206,7 @@ export class KeyManager {
   /**
    * Delete a keypair by ID
    */
-  private async deleteKeypairById(keypairId: number): Promise<boolean> {
+  private async deleteKeypairById(keypair: Keypair): Promise<boolean> {
     const { confirm } = await escapeablePrompt([
       {
         type: 'confirm',
@@ -1125,123 +1217,112 @@ export class KeyManager {
     ])
 
     if (confirm) {
-      this.db.delete('keypair', { key: 'id', value: keypairId })
-      console.log()
-      showSuccess('Keypair deleted.')
-      console.log()
+      await this.removeKeypair(keypair)
       return true
     }
     return false
   }
 
   /**
-   * Set a keypair as default
+   * Delete a keypair row, forget its cached passphrase, and make sure a
+   * default remains when other keypairs exist.
    */
-  private async setDefaultKeypair(): Promise<void> {
-    const keypairs = this.db.select({ table: 'keypair' })
+  private async removeKeypair(keypair: Keypair): Promise<void> {
+    this.db.delete('keypair', { key: 'id', value: keypair.id })
+    removeCachedPassphrase(keypair.fingerprint)
+    console.log()
+    showSuccess('Keypair deleted.')
+    console.log()
 
-    if (keypairs.length === 0) {
-      console.log()
-      showWarning('No keypairs available.')
+    if (!keypair.is_default) return
+
+    const remaining = this.db.select({ table: 'keypair' })
+    if (remaining.length === 0) return
+    const only = remaining[0]
+    if (remaining.length === 1 && only) {
+      this.db.setDefaultKeypair(only.id)
+      showInfo(`"${only.name}" is now your default keypair.`)
       console.log()
       return
     }
+    showWarning('The deleted keypair was your default. Choose a new one:')
+    console.log()
+    await this.chooseDefaultKeypair({ allowSkip: true })
+  }
 
-    const { keypairId } = await escapeablePrompt([
-      {
-        type: 'list',
-        name: 'keypairId',
-        message: promptMessage('Select default keypair:'),
-        choices: keypairs.map((kp) => ({
-          name: `${icons.key} ${kp.name} ${colors.muted(`(${obfuscateEmail(kp.email)})`)} ${kp.is_default ? `${icons.default} Current Default` : ''}`,
-          value: kp.id,
-        })),
-      },
-    ])
+  /**
+   * Ask for a private key's passphrase, verify it actually unlocks the key,
+   * and retry up to three times on a wrong answer. Returns null when the user
+   * gives up. The verified passphrase is cached so the first decrypt does not
+   * ask again.
+   */
+  private async promptPassphraseWithRetry(
+    privateKeyArmored: string,
+    message: string
+  ): Promise<{
+    keyInfo: Awaited<ReturnType<typeof extractPrivateKeyInfo>>
+    passphrase: string
+  } | null> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { passphrase } = await escapeablePrompt<{ passphrase: string }>([
+        {
+          type: 'password',
+          name: 'passphrase',
+          message: promptMessage(message),
+          mask: '*',
+        },
+      ])
 
-    // Unset all defaults
-    for (const kp of keypairs) {
-      this.db.update(
-        'keypair',
-        { key: 'id', value: kp.id },
-        { is_default: false }
+      try {
+        const keyInfo = await extractPrivateKeyInfo(
+          privateKeyArmored,
+          passphrase || undefined
+        )
+        if (keyInfo.passphraseProtected && !passphrase) {
+          showWarning('This key is passphrase-protected; the passphrase is required.')
+          continue
+        }
+        if (keyInfo.passphraseProtected) {
+          cachePassphrase(keyInfo.fingerprint, passphrase)
+        }
+        return { keyInfo, passphrase }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        if (/passphrase/i.test(msg)) {
+          showError(
+            attempt < 3
+              ? 'Incorrect passphrase. Try again.'
+              : 'Incorrect passphrase. Giving up.'
+          )
+          continue
+        }
+        console.log()
+        showError(`Could not read private key: ${msg}`)
+        console.log()
+        return null
+      }
+    }
+    return null
+  }
+
+  /**
+   * If this private key's fingerprint is already stored, say so and return true.
+   */
+  private async rejectIfAlreadyStored(privateKeyArmored: string): Promise<boolean> {
+    try {
+      const key = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored })
+      const existing = this.db.getKeypairByFingerprint(key.getFingerprint())
+      if (!existing) return false
+      console.log()
+      showWarning(
+        `This key is already stored as "${existing.name}" (${obfuscateEmail(existing.email)}). Nothing to import.`
       )
+      console.log()
+      return true
+    } catch {
+      // Let the normal import path report parse errors
+      return false
     }
-
-    // Set new default
-    this.db.update(
-      'keypair',
-      { key: 'id', value: keypairId },
-      { is_default: true }
-    )
-
-    console.log()
-    showSuccess('Default keypair updated!')
-    console.log()
-  }
-
-  /**
-   * Delete a keypair
-   */
-  private async deleteKeypair(): Promise<void> {
-    const keypairs = this.db.select({ table: 'keypair' })
-
-    if (keypairs.length === 0) {
-      console.log()
-      showWarning('No keypairs available.')
-      console.log()
-      return
-    }
-
-    const { keypairId } = await escapeablePrompt([
-      {
-        type: 'list',
-        name: 'keypairId',
-        message: promptMessage('Select keypair to delete:'),
-        choices: keypairs.map((kp) => ({
-          name: `${icons.key} ${kp.name} ${colors.muted(`(${obfuscateEmail(kp.email)})`)}`,
-          value: kp.id,
-        })),
-      },
-    ])
-
-    const { confirm } = await escapeablePrompt([
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: colors.error('Are you sure? This action cannot be undone.'),
-        default: false,
-      },
-    ])
-
-    if (confirm) {
-      this.db.delete('keypair', { key: 'id', value: keypairId })
-      console.log()
-      showSuccess('Keypair deleted.')
-      console.log()
-    }
-  }
-
-  /**
-   * Read multiline input from stdin
-   */
-  private async readMultilineInput(): Promise<string> {
-    return new Promise((resolve) => {
-      const lines: string[] = []
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      })
-      rl.setPrompt('')
-
-      rl.on('line', (line: string) => {
-        lines.push(line)
-      })
-
-      rl.on('close', () => {
-        resolve(lines.join('\n'))
-      })
-    })
   }
 
   /**
@@ -1286,21 +1367,24 @@ export class KeyManager {
 
     if (contacts.length === 0) {
       console.log()
-      showWarning('No contacts found.')
+      showInfo(
+        'No contacts yet. Contacts are added automatically when you encrypt to a pasted key, or add one now.'
+      )
       console.log()
-      return
     }
 
     const { contactId } = await escapeablePrompt([
       {
         type: 'list',
         name: 'contactId',
-        message: promptMessage('Select a contact to manage:'),
+        message: promptMessage('Contacts'),
         choices: [
           ...contacts.map((c) => ({
-            name: `${icons.contact} ${c.name} ${colors.muted(`- ${c.email}`)}`,
+            name: `${icons.contact} ${c.name} ${colors.muted(`- ${obfuscateEmail(c.email)}`)}`,
             value: c.id,
           })),
+          ...(contacts.length > 0 ? [new inquirer.Separator()] : []),
+          { name: `${icons.add} Add contact (paste public key)`, value: 'add' },
           new inquirer.Separator(),
           backChoice(),
           mainMenuChoice(),
@@ -1317,11 +1401,125 @@ export class KeyManager {
       return
     }
 
+    if (contactId === 'add') {
+      await this.addContactManually()
+      return this.viewAndManageContacts()
+    }
+
     const selectedContact = contacts.find((c) => c.id === contactId)
     if (!selectedContact) return
 
     const result = await this.manageIndividualContact(selectedContact)
     if (result === 'main-menu') return 'main-menu'
+  }
+
+  /**
+   * Add a contact from a pasted (or clipboard) public key.
+   */
+  private async addContactManually(): Promise<void> {
+    printSectionHeader('Add Contact')
+    let armored = ''
+
+    try {
+      const clipboardy = (await import('clipboardy')).default
+      const content = await clipboardy.read()
+      const match = content.match(
+        /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/
+      )
+      if (match) {
+        const { useClipboard } = await escapeablePrompt<{ useClipboard: boolean }>([
+          {
+            type: 'confirm',
+            name: 'useClipboard',
+            message: promptMessage('Public key detected in clipboard. Use it?'),
+            default: true,
+          },
+        ])
+        if (useClipboard) armored = match[0]
+      }
+    } catch {
+      // Clipboard unavailable
+    }
+
+    if (!armored) {
+      console.log(promptMessage("\nPaste the contact's PGP PUBLIC key:"))
+      console.log(
+        colors.muted('(Press Enter to finish, or press Enter then Ctrl+D)')
+      )
+      armored = await this.readKeyInput()
+    }
+    if (!armored.includes('BEGIN PGP PUBLIC KEY BLOCK')) {
+      console.log()
+      showError('That is not a PGP public key block.')
+      console.log()
+      return
+    }
+
+    let info: Awaited<ReturnType<typeof extractPublicKeyInfo>>
+    try {
+      info = await extractPublicKeyInfo(armored)
+    } catch (error) {
+      console.log()
+      showError(
+        `Could not read public key: ${error instanceof Error ? error.message : error}`
+      )
+      console.log()
+      return
+    }
+
+    if (this.db.getKeypairByFingerprint(info.fingerprint)) {
+      console.log()
+      showWarning('That is one of your own keypairs; it does not need to be a contact.')
+      console.log()
+      return
+    }
+
+    const { name } = await escapeablePrompt<{ name: string }>([
+      {
+        type: 'input',
+        name: 'name',
+        message: promptMessage('Contact name:'),
+        default: info.name !== 'Unknown' ? info.name : '',
+        validate: (input: string) =>
+          input.trim().length > 0 || 'Name cannot be empty',
+      },
+    ])
+
+    const existing = this.db
+      .select({ table: 'contact' })
+      .find((c) => c.fingerprint === info.fingerprint)
+    if (existing) {
+      this.db.update(
+        'contact',
+        { key: 'id', value: existing.id },
+        {
+          name: name.trim(),
+          email: info.email,
+          public_key: armored,
+          expires_at: info.expiresAt,
+          revoked: info.revoked,
+        }
+      )
+      console.log()
+      showSuccess(`Updated contact "${name.trim()}".`)
+    } else {
+      this.db.insert('contact', {
+        name: name.trim(),
+        email: info.email,
+        fingerprint: info.fingerprint,
+        public_key: armored,
+        algorithm: info.algorithm,
+        key_size: info.keySize,
+        trusted: false,
+        last_verified_at: null,
+        notes: null,
+        expires_at: info.expiresAt,
+        revoked: info.revoked,
+      })
+      console.log()
+      showSuccess(`Added contact "${name.trim()}" (${obfuscateEmail(info.email)}).`)
+    }
+    console.log()
   }
 
   /**
@@ -1333,9 +1531,9 @@ export class KeyManager {
     // Display contact information
     printSectionHeader('Contact Details')
     showKeyValue('Name', contact.name)
-    showKeyValue('Email', contact.email)
+    showKeyValue('Email', obfuscateEmail(contact.email))
     showKeyValue('Fingerprint', contact.fingerprint)
-    showKeyValue('Algorithm', `${contact.algorithm} (${contact.key_size})`)
+    showKeyValue('Algorithm', formatAlgorithm(contact.algorithm, contact.key_size))
     showKeyValue('Trusted', contact.trusted ? 'Yes' : 'No')
     if (contact.expires_at) {
       showKeyValue('Expires', contact.expires_at)

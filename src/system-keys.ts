@@ -1,4 +1,4 @@
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -17,7 +17,7 @@ export type SystemKey = {
  */
 export function isGpgInstalled(): boolean {
   try {
-    execSync('gpg --version', { stdio: 'ignore' })
+    execFileSync('gpg', ['--version'], { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -36,15 +36,17 @@ export function listGpgKeys(): {
 
   try {
     // List public keys
-    const publicOutput = execSync('gpg --list-keys --with-colons', {
+    const publicOutput = execFileSync('gpg', ['--list-keys', '--with-colons'], {
       encoding: 'utf-8',
     })
     publicKeys.push(...parseGpgOutput(publicOutput, 'public'))
 
     // List secret keys
-    const secretOutput = execSync('gpg --list-secret-keys --with-colons', {
-      encoding: 'utf-8',
-    })
+    const secretOutput = execFileSync(
+      'gpg',
+      ['--list-secret-keys', '--with-colons'],
+      { encoding: 'utf-8' }
+    )
     secretKeys.push(...parseGpgOutput(secretOutput, 'secret'))
   } catch (error) {
     // GPG might not be installed or have no keys
@@ -56,7 +58,7 @@ export function listGpgKeys(): {
 /**
  * Parse GPG --list-keys output
  */
-function parseGpgOutput(
+export function parseGpgOutput(
   output: string,
   type: 'public' | 'secret'
 ): SystemKey[] {
@@ -64,6 +66,9 @@ function parseGpgOutput(
   const lines = output.split('\n')
 
   let currentKey: Partial<SystemKey> | null = null
+  // gpg emits an `fpr` record after every `sub`/`ssb` as well as after the
+  // primary key; only the first `fpr` (and first `uid`) belong to the key.
+  let inSubkey = false
 
   for (const line of lines) {
     const fields = line.split(':')
@@ -79,11 +84,13 @@ function parseGpgOutput(
         type,
         keyId: fields[4] || '',
       }
-    } else if (recordType === 'fpr' && currentKey) {
-      // Fingerprint
-      currentKey.fingerprint = fields[9] || ''
-    } else if (recordType === 'uid' && currentKey) {
-      // User ID (name and email)
+      inSubkey = false
+    } else if (recordType === 'sub' || recordType === 'ssb') {
+      inSubkey = true
+    } else if (recordType === 'fpr' && currentKey && !inSubkey) {
+      if (!currentKey.fingerprint) currentKey.fingerprint = fields[9] || ''
+    } else if (recordType === 'uid' && currentKey && currentKey.uid === undefined) {
+      // Primary user ID (name and email); later uids are ignored
       const uid = fields[9] || ''
       currentKey.uid = uid
 
@@ -118,7 +125,7 @@ function parseGpgOutput(
  */
 export function exportGpgPublicKey(keyId: string): string | null {
   try {
-    const output = execSync(`gpg --armor --export ${keyId}`, {
+    const output = execFileSync('gpg', ['--armor', '--export', keyId], {
       encoding: 'utf-8',
     })
     return output.trim()
@@ -132,9 +139,11 @@ export function exportGpgPublicKey(keyId: string): string | null {
  */
 export function exportGpgSecretKey(keyId: string): string | null {
   try {
-    const output = execSync(`gpg --armor --export-secret-keys ${keyId}`, {
-      encoding: 'utf-8',
-    })
+    const output = execFileSync(
+      'gpg',
+      ['--armor', '--export-secret-keys', keyId],
+      { encoding: 'utf-8' }
+    )
     return output.trim()
   } catch (error) {
     return null
