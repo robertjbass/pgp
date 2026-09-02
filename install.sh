@@ -199,8 +199,6 @@ install_dependencies() {
     if [ ! -f ".npmrc" ]; then
         print_info "Creating .npmrc configuration..."
         cat > .npmrc << EOF
-enable-pre-post-scripts=true
-only-built-dependencies[]=better-sqlite3
 only-built-dependencies[]=esbuild
 EOF
         print_success ".npmrc created"
@@ -234,7 +232,7 @@ create_alias() {
         INSTALL_DIR=$(pwd)
 
         # Create alias command
-        ALIAS_CMD="alias lpgp='cd $INSTALL_DIR && pnpm dev'"
+        ALIAS_CMD="alias lpgp='(cd \"$INSTALL_DIR\" && pnpm dev)'"
 
         # Add to shell config if not already there
         if ! grep -q "alias lpgp=" "$SHELL_CONFIG" 2>/dev/null; then

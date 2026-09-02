@@ -21,7 +21,10 @@ jobs:
       - name: Get npm version
         id: npm_version
         run: |
-          NPM_VERSION=$(npm view lpgp version 2>/dev/null || echo "0.0.0")
+          if ! NPM_VERSION=$(npm view lpgp version 2>/dev/null); then
+            echo "Could not read the published version from npm; refusing to guess."
+            exit 1
+          fi
           echo "version=$NPM_VERSION" >> $GITHUB_OUTPUT
 
       - name: Compare versions
